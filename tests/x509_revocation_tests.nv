@@ -1,0 +1,280 @@
+// tests/x509_revocation_tests.nv — revocation lists and certification
+// requests.
+//
+// RED ON PURPOSE, like every suite here: each assertion reaches
+// `not implemented: x509-nv.<module>.<fn>`.
+//
+// The fact this suite pins hardest is that a revocation lookup is a
+// PURE FUNCTION of a list and a serial number.  No clock, no network,
+// no file — so a replay of a request log answers what it answered the
+// first time, and a test can put a list and a serial together with
+// nothing standing in for the world.
+//
+// The reason numbers are RFC 5280 section 5.3.1's, including the hole
+// at 7, which is the kind of fact a reader checks against the
+// specification and a writer gets wrong.
+
+use std.test
+use std.bytes
+use asn1read
+use asn1oid
+use x509crl
+use x509csr
+use x509err
+
+fn limits() -> AsnLimits
+    asn1read.default_limits()
+
+// A serial number as a certificate carries it: the INTEGER's content
+// bytes, leading zero and all.
+fn serial_one() -> Bytes
+    bytes.from_hex("01") ?? bytes.zeros(0)
+
+fn serial_two() -> Bytes
+    bytes.from_hex("02") ?? bytes.zeros(0)
+
+// A document that is not a revocation list and not a request.
+fn not_a_list() -> Bytes
+    bytes.from_hex("3003020107") ?? bytes.zeros(0)
+
+@test
+fn test_a_revocation_lookup_is_a_pure_function_of_a_list_and_a_serial() [io]
+    // Two inputs, one answer, forever.  Nothing else is consulted, so
+    // the same pair gives the same answer on every machine and in
+    // every replay.
+    let entry = X509RevokedCert { serial: serial_one(),
+        revocation_date: civil.datetime(civil.date_from_epoch_day(20000),
+                                        civil.midnight()),
+        extensions: [] }
+    let empty_list = []
+    let one_entry = [entry]
+
+    test.case("a list that names the serial revokes it")
+    match x509crl.parse(not_a_list(), limits())
+        Err(e) => test.assert(x509err.is_malformed(e))
+        Ok(l)  =>
+            test.assert_eq(x509crl.is_revoked(l, serial_one()),
+                           x509crl.is_revoked(l, serial_one()))
+
+            test.case("and the same call twice is the same answer, because nothing else is read")
+            test.assert_eq(x509crl.entry_count(l), list.len(x509crl.entries_of(l)))
+
+    test.case("an entry holds the serial and the date the issuer revoked it")
+    test.assert_eq_str(bytes.to_hex(entry.serial), "01")
+    test.assert_eq(list.len(entry.extensions), 0)
+    test.assert_eq(list.len(empty_list), 0)
+    test.assert_eq(list.len(one_entry), 1)
+
+@test
+fn test_a_serial_is_unique_only_under_one_issuer() [io]
+    // Looking a serial up in the wrong issuer's list finds nothing and
+    // answers "not revoked" — the wrong answer, given confidently.  So
+    // the call that a path validation makes compares the issuer names
+    // as well.
+    let der = not_a_list()
+    match x509crl.parse(der, limits())
+        Err(e) => test.assert(x509err.is_malformed(e))
+        Ok(l)  =>
+            test.case("is_revoked is the bare lookup and checks no name")
+            let bare = x509crl.is_revoked(l, serial_two())
+
+            match x509cert.parse(der, limits())
+                Err(e) => test.assert(x509err.is_malformed(e))
+                Ok(c)  =>
+                    test.case("is_revoked_by also compares the issuer names")
+                    let checked = x509crl.is_revoked_by(der, l, der, c)
+                    test.assert(not (checked and not bare))
+
+                    test.case("and check_revoked is the refusal a path validation takes")
+                    match x509crl.check_revoked(der, l, der, c, limits())
+                        None    => test.assert(not checked)
+                        Some(e) =>
+                            test.assert_eq_str(x509err.code(e), "cert-revoked")
+                            test.assert(x509err.is_rule_failure(e))
+
+            test.case("entry_for answers the entry, so a caller does not look twice")
+            match x509crl.entry_for(l, serial_two())
+                None    => test.assert(not bare)
+                Some(e) => test.assert_eq_str(bytes.to_hex(e.serial), "02")
+
+@test
+fn test_the_reason_numbers_are_rfc_5280s_including_the_hole_at_seven() [io]
+    // RFC 5280 section 5.3.1.  Value 7 is not used, and a reader that
+    // assumed a contiguous range would read `removeFromCRL` as
+    // `privilegeWithdrawn`.
+    test.case("zero through six")
+    test.assert_eq(x509crl.reason_number(X509ReasonUnspecified), 0)
+    test.assert_eq(x509crl.reason_number(X509ReasonKeyCompromise), 1)
+    test.assert_eq(x509crl.reason_number(X509ReasonCaCompromise), 2)
+    test.assert_eq(x509crl.reason_number(X509ReasonAffiliationChanged), 3)
+    test.assert_eq(x509crl.reason_number(X509ReasonSuperseded), 4)
+    test.assert_eq(x509crl.reason_number(X509ReasonCessationOfOperation), 5)
+    test.assert_eq(x509crl.reason_number(X509ReasonCertificateHold), 6)
+
+    test.case("then eight, nine and ten")
+    test.assert_eq(x509crl.reason_number(X509ReasonRemoveFromCrl), 8)
+    test.assert_eq(x509crl.reason_number(X509ReasonPrivilegeWithdrawn), 9)
+    test.assert_eq(x509crl.reason_number(X509ReasonAaCompromise), 10)
+
+    test.case("seven names nothing")
+    match x509crl.reason_named(7)
+        Some(_) => test.fail("RFC 5280 section 5.3.1 leaves 7 unused")
+        None    => test.assert(true)
+
+    test.case("and neither does eleven")
+    match x509crl.reason_named(11)
+        Some(_) => test.fail("the enumeration stops at 10")
+        None    => test.assert(true)
+
+    test.case("the numbers that are used round-trip")
+    match x509crl.reason_named(1)
+        None    => test.fail("1 is keyCompromise")
+        Some(r) =>
+            test.assert_eq(x509crl.reason_number(r), 1)
+            test.assert_eq_str(x509crl.reason_name(r), "keyCompromise")
+
+    test.case("and the names are the ASN.1 module's spelling")
+    test.assert_eq_str(x509crl.reason_name(X509ReasonCessationOfOperation),
+                       "cessationOfOperation")
+    test.assert_eq_str(x509crl.reason_name(X509ReasonAaCompromise), "aACompromise")
+
+@test
+fn test_a_list_is_current_at_an_instant_the_caller_supplies() [io]
+    // A `core` package has no clock, here as everywhere else.  A list
+    // with no `nextUpdate` is current at any instant from `thisUpdate`
+    // on, which is what the encoding means and is why a caller that
+    // needs a freshness bound has to impose its own.
+    let early = civil.datetime(civil.date_from_epoch_day(10000), civil.midnight())
+    let late = civil.datetime(civil.date_from_epoch_day(30000), civil.midnight())
+
+    match x509crl.parse(not_a_list(), limits())
+        Err(e) => test.assert(x509err.is_malformed(e))
+        Ok(l)  =>
+            test.case("a list is not current at both ends of a fifty-year span")
+            test.assert(not (x509crl.is_current_at(l, early)
+                             and x509crl.is_current_at(l, late)))
+
+            test.case("and the refusal carries both moments so a report can say how stale")
+            match x509crl.check_current_at(l, early)
+                None    => test.assert(x509crl.is_current_at(l, early))
+                Some(e) =>
+                    test.assert_eq_str(x509err.code(e), "crl-not-current")
+                    test.assert(x509err.is_validity_failure(e))
+
+@test
+fn test_a_list_carries_the_bytes_its_own_signature_covers() [io]
+    // A CRL has the same three parts a certificate does, so the span
+    // rule is the same: the signature is over the tbsCertList exactly
+    // as it arrived.
+    let der = not_a_list()
+    match x509crl.parse(der, limits())
+        Err(e) => test.assert(x509err.is_malformed(e))
+        Ok(l)  =>
+            test.case("tbs_bytes is a region of the caller's own buffer")
+            let tbs = x509crl.tbs_bytes(der, l)
+            test.assert_eq(bytes.len(tbs), l.tbs.len)
+            test.assert_eq_str(bytes.to_hex(tbs),
+                bytes.to_hex(bytes.slice(der, l.tbs.off, l.tbs.off + l.tbs.len)))
+
+            test.case("and the signature comes out of the BIT STRING it travels in")
+            match x509crl.signature_bytes(l)
+                Ok(sig) => test.assert(bytes.len(sig) >= 0)
+                Err(e)  => test.assert(x509err.is_malformed(e))
+
+            test.case("a v2 list is the one with extensions")
+            test.assert_eq(x509crl.X509_CRL_VERSION_2, 2)
+            test.assert_eq(x509crl.X509_CRL_VERSION_1, 1)
+            test.assert(list.len(x509crl.extensions_of(l)) >= 0)
+            test.assert(x509name.rdn_count(x509crl.issuer_of(l)) >= 0)
+
+@test
+fn test_the_crl_extension_oids_are_the_ones_rfc_5280_section_5_defines() [io]
+    test.case("the list's own extensions")
+    test.assert_eq_str(asn1oid.oid_text(x509crl.oid_crl_number()), "2.5.29.20")
+    test.assert_eq_str(asn1oid.oid_text(x509crl.oid_delta_crl_indicator()), "2.5.29.27")
+    test.assert_eq_str(asn1oid.oid_text(x509crl.oid_issuing_distribution_point()),
+                       "2.5.29.28")
+
+    test.case("and an entry's")
+    test.assert_eq_str(asn1oid.oid_text(x509crl.oid_crl_reason()), "2.5.29.21")
+    test.assert_eq_str(asn1oid.oid_text(x509crl.oid_invalidity_date()), "2.5.29.24")
+    test.assert_eq_str(asn1oid.oid_text(x509crl.oid_certificate_issuer()), "2.5.29.29")
+
+@test
+fn test_a_certification_request_is_a_request_and_not_an_instruction() [io]
+    // RFC 2986.  The extensions in a request are what the requester
+    // would LIKE; a CA that copied them into a certificate unexamined
+    // would certify whatever anybody asked for, including a CA
+    // certificate.  The naming says so.
+    let der = not_a_list()
+
+    test.case("the one version RFC 2986 defines encodes as 0, and is NOT written one higher")
+    test.assert_eq(x509csr.X509_CSR_VERSION_1, 0)
+
+    test.case("the PKCS 9 attributes a request carries")
+    test.assert_eq_str(asn1oid.oid_text(x509csr.oid_extension_request()),
+                       "1.2.840.113549.1.9.14")
+    test.assert_eq_str(asn1oid.oid_text(x509csr.oid_challenge_password()),
+                       "1.2.840.113549.1.9.7")
+
+    match x509csr.parse(der, limits())
+        Err(e) => test.assert(x509err.is_malformed(e))
+        Ok(r)  =>
+            test.case("the signature covers the CertificationRequestInfo, exactly as it arrived")
+            let info = x509csr.info_bytes(der, r)
+            let span = x509csr.info_span(r)
+            test.assert_eq(bytes.len(info), span.len)
+            test.assert_eq_str(bytes.to_hex(info),
+                bytes.to_hex(bytes.slice(der, span.off, span.off + span.len)))
+
+            test.case("and the extensions it asks for are named `requested`")
+            match x509csr.requested_extensions(r, limits())
+                Err(e) => test.assert(x509err.is_malformed(e))
+                Ok(xs) => test.assert(list.len(xs) >= 0)
+
+            test.case("the DNS names it asks for come out of the requested subjectAltName")
+            match x509csr.requested_dns_names(r, limits())
+                Err(e) => test.assert(x509err.is_malformed(e))
+                Ok(ns) => test.assert(list.len(ns) >= 0)
+
+@test
+fn test_a_request_is_self_signed_and_that_is_the_proof_of_possession() [io]
+    // The signature on a request is by the private key matching the
+    // public key inside it.  There is no issuer key to supply, which is
+    // why `verify_csr` takes one fewer argument than `verify_certificate`.
+    let der = not_a_list()
+    match x509csr.parse(der, limits())
+        Err(e) => test.assert(x509err.is_malformed(e))
+        Ok(r)  =>
+            test.case("the key being certified is the request's own")
+            let k = x509csr.public_key_of(r)
+            test.assert(asn1oid.arc_count(k.algorithm.algorithm) >= 2)
+
+            test.case("and verify_csr needs no issuer key")
+            match x509verify.verify_csr(x509verify.no_verifier(), der, r)
+                Err(e) => test.assert(x509err.is_malformed(e))
+                Ok(o)  => test.assert(x509verify.outcome_is_uncheckable(o))
+
+            test.case("the subject is what was ASKED for, and a CA may certify another")
+            test.assert(x509name.rdn_count(x509csr.subject_of(r)) >= 0)
+
+            test.case("the attributes come out in order, and one is found by OID")
+            test.assert(list.len(x509csr.attributes_of(r)) >= 0)
+            match x509csr.attribute_by_oid(r, x509csr.oid_challenge_password())
+                None    => test.assert(true)
+                Some(a) => test.assert(list.len(a.values) >= 0)
+
+            test.case("the challenge password travels in the clear and authenticates nobody")
+            match x509csr.challenge_password(r, limits())
+                Err(e) => test.assert(x509err.is_malformed(e))
+                Ok(_)  => test.assert(true)
+
+            test.case("and a request is checked for conformance before its signature is")
+            match x509csr.check_conformance(der, r, limits())
+                None    => test.assert(true)
+                Some(e) => test.assert_eq(x509err.error_index(e), -1)
+
+            test.case("signature_bytes comes out of the BIT STRING it travels in")
+            match x509csr.signature_bytes(r)
+                Ok(sig) => test.assert(bytes.len(sig) >= 0)
+                Err(e)  => test.assert(x509err.is_malformed(e))

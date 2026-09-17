@@ -1,0 +1,247 @@
+// x509name — a distinguished name, and the one rule about comparing
+// two of them.
+//
+// Every body is a `todo()`.  The signatures are the design, and the
+// compiler checks them as claims; see the README for the stamp.
+//
+// WHAT A DISTINGUISHED NAME IS.  X.501 gives every entity in a
+// directory a path, and a certificate carries two of them: the issuer
+// and the subject.  The path is a sequence of RELATIVE distinguished
+// names, outermost first, and each relative name is a SET of
+// attributes — an attribute being a type, named by an OBJECT
+// IDENTIFIER, and a value.  `CN=example.com` is one attribute: the
+// type `2.5.4.3`, `id-at-commonName`, and the string `example.com`.
+// In practice every relative name holds exactly one attribute and the
+// SET is a formality, but it is a SET in the encoding and a parser
+// that assumed otherwise reads a plausible wrong name.
+//
+// THE NAMES ARE ASN1-NV'S OWN.  `AsnName`, `AsnRdn` and `AsnAttribute`
+// come from `asn1pkix`, and this module takes and answers those rather
+// than declaring a third spelling of the same three structures.  What
+// it adds is the part a certificate program needs and a DER parser has
+// no opinion about: the attribute types RFC 5280 requires support for,
+// the RFC 4514 text form with its escaping, and the comparison a chain
+// is built with.
+//
+// NAMES ARE COMPARED BY ENCODING, AND THAT IS THE LOAD-BEARING RULE
+// HERE.  Building a chain means finding the certificate whose SUBJECT
+// is this certificate's ISSUER.  RFC 5280 section 7.1 defines a full
+// name-matching algorithm — case folding, whitespace collapse,
+// equivalence between PrintableString and UTF8String — and almost
+// nothing implements it, because the certificates that exist were
+// issued by a CA that copied its own subject bytes into the issuer
+// field.  So the comparison this package publishes is
+// `issuer_matches_subject`, it compares the DER BYTES of the two
+// names, and `to_rfc4514` is for a person and explicitly not for that.
+// Two names that print the same can have different encodings; a chain
+// check that compared the printed forms would accept a certificate
+// issued by somebody else's CA with a subject that renders the same.
+//
+// WHICH IS WHY `AsnName` CARRIES A SPAN.  The span points into the
+// bytes the caller supplied, so the comparison reads the original
+// encoding rather than a re-encoding of parsed values, and a name
+// whose writer was not byte-for-byte canonical still matches itself.
+
+// The attribute types RFC 5280 section 4.1.2.4 requires a conforming
+// implementation to be prepared to receive, that `asn1oid` does not
+// already name.
+//
+// `asn1oid` publishes `oid_common_name`, `oid_country_name`,
+// `oid_organization_name` and `oid_organizational_unit_name`, and they
+// are not repeated here: one OID has one home, and a package that
+// published a second `2.5.4.3` would make a reader wonder which is
+// authoritative.
+
+// `2.5.4.7` — `id-at-localityName`, the `L=` of a distinguished name.
+//
+// ```novo
+// use asn1oid
+// use x509name
+//
+// fn main() [io]
+//     println(asn1oid.oid_text(x509name.oid_locality_name()))   // 2.5.4.7
+// ```
+pub fn oid_locality_name() -> AsnOid []
+    todo("x509-nv.x509name.oid_locality_name")
+
+// `2.5.4.8` — `id-at-stateOrProvinceName`, `ST=`.
+pub fn oid_state_or_province_name() -> AsnOid []
+    todo("x509-nv.x509name.oid_state_or_province_name")
+
+// `2.5.4.5` — `id-at-serialNumber`.  The serial number of the ENTITY,
+// which is not the certificate's serial number and is a different
+// field entirely.
+pub fn oid_serial_number() -> AsnOid []
+    todo("x509-nv.x509name.oid_serial_number")
+
+// `2.5.4.46` — `id-at-dnQualifier`.  A disambiguator a registrar adds
+// when two entities would otherwise have the same name.
+pub fn oid_dn_qualifier() -> AsnOid []
+    todo("x509-nv.x509name.oid_dn_qualifier")
+
+// `0.9.2342.19200300.100.1.25` — `domainComponent`, `DC=`.
+//
+// From RFC 4519 rather than X.500, and the way an Active Directory
+// forest writes a name: `DC=example,DC=com`.  The arc is under
+// joint-ISO-ITU-T, which is the arc whose second component has no
+// bound, and is therefore the one an OID decoder without a cap on the
+// first arc reads wrongly.
+pub fn oid_domain_component() -> AsnOid []
+    todo("x509-nv.x509name.oid_domain_component")
+
+// `1.2.840.113549.1.9.1` — `emailAddress`, the PKCS #9 attribute.
+//
+// RFC 5280 section 4.1.2.6 deprecates it: an email address belongs in
+// the subject alternative name extension, as an `rfc822Name`.  It is
+// named here because certificates that carry it exist and a reader
+// that could not name the attribute would print a dotted OID.
+pub fn oid_email_address() -> AsnOid []
+    todo("x509-nv.x509name.oid_email_address")
+
+// The RFC 4514 section 3 short name for an attribute type — `"CN"`,
+// `"L"`, `"ST"`, `"O"`, `"OU"`, `"C"`, `"STREET"`, `"DC"`, `"UID"` —
+// or `""` for a type the table does not hold.
+//
+// `""` rather than the dotted text, so that a caller can tell "this is
+// the common name" from "this is 1.2.3.4" and choose what to print.
+// `to_rfc4514` writes the dotted form with a `#`-prefixed hex value
+// for the types that have no short name, which is what RFC 4514
+// section 2.4 requires.
+//
+// ```novo
+// use asn1oid
+// use x509name
+//
+// fn main() [io]
+//     println(x509name.attribute_short_name(asn1oid.oid_common_name()))   // CN
+// ```
+pub fn attribute_short_name(o: AsnOid) -> Str []
+    todo("x509-nv.x509name.attribute_short_name")
+
+// Every attribute of the name, flattened out of its relative names, in
+// the order they were encoded.
+//
+// The order is the encoding's, outermost relative name first, which is
+// the reverse of the order RFC 4514 prints them in.
+pub fn attributes(n: AsnName) -> [AsnAttribute] []
+    todo("x509-nv.x509name.attributes")
+
+// Every value of every attribute with this type, in encoding order.
+//
+// A list and not an option, because a name may carry two attributes of
+// one type — two organizational units is ordinary — and a function
+// that answered the first would silently drop the second.
+//
+// ```novo
+// use asn1oid
+// use x509name
+// use asn1pkix
+//
+// fn main() [io]
+//     let n = AsnName { rdns: [], span: AsnSpan { off: 0, len: 0 } }
+//     let ous = x509name.attribute_values(n, asn1oid.oid_organizational_unit_name())
+//     println("${list.len(ous)}")
+// ```
+pub fn attribute_values(n: AsnName, o: AsnOid) -> [Str] []
+    todo("x509-nv.x509name.attribute_values")
+
+// The first common name in the name, or `None`.
+//
+// **Not for matching a hostname.** RFC 6125 section 6.4.4 deprecated
+// that in 2011 and RFC 9525 removed it in 2024: a certificate's
+// hostnames are in the subject alternative name extension, and
+// `x509ext.dns_names` is where a reader that matches a host looks.
+// This is for a log line, a certificate viewer and an operator asking
+// which certificate they are holding.
+pub fn common_name(n: AsnName) -> ?Str []
+    todo("x509-nv.x509name.common_name")
+
+// How many relative distinguished names the name holds.
+//
+// Zero for an empty name, which RFC 5280 section 4.1.2.6 permits as a
+// subject only when the certificate carries a critical subject
+// alternative name extension.
+pub fn rdn_count(n: AsnName) -> Int []
+    todo("x509-nv.x509name.rdn_count")
+
+// Whether the name holds no relative distinguished names at all.
+//
+// An empty ISSUER is never conforming.  An empty SUBJECT is, in the
+// one case above, and `x509path.validate` checks the pair rather than
+// letting a caller discover it.
+pub fn is_empty(n: AsnName) -> Bool []
+    todo("x509-nv.x509name.is_empty")
+
+// The name as RFC 4514 text: `CN=example.com,O=Acme Ltd,C=GB`, the
+// outermost relative name LAST.
+//
+// RFC 4514 section 2.1 reverses the encoding's order, so the most
+// specific attribute is written first.  A value is escaped by section
+// 2.4: a leading `#` or space, a trailing space, and every `,`, `+`,
+// `"`, `\`, `<`, `>` and `;` inside it take a backslash.  An attribute
+// type with no short name is written as its dotted OID with the
+// value's DER in hex after a `#`.
+//
+// **For a person, and not for a comparison.**
+// `issuer_matches_subject` is the comparison.
+pub fn to_rfc4514(n: AsnName) -> Str []
+    todo("x509-nv.x509name.to_rfc4514")
+
+// One attribute value escaped by RFC 4514 section 2.4.
+//
+// Published on its own because a program that builds a filter string
+// or a log field out of one attribute needs the same escaping and
+// would otherwise write it again, differently.
+//
+// ```novo
+// use x509name
+//
+// fn main() [io]
+//     println(x509name.escape_rfc4514("Acme, Ltd"))   // Acme\, Ltd
+// ```
+pub fn escape_rfc4514(value: Str) -> Str []
+    todo("x509-nv.x509name.escape_rfc4514")
+
+// The span the whole name occupies in the bytes it was read from.
+//
+// The bytes a comparison reads.  Published so that a caller holding a
+// name can hash it, index it or store it without re-encoding.
+pub fn name_span(n: AsnName) -> AsnSpan []
+    todo("x509-nv.x509name.name_span")
+
+// The name's DER, copied out of the bytes it was read from.
+//
+// The one function here that allocates, and it is named so a caller
+// can see where the copy happens.  A trust store keyed by issuer name
+// holds these.
+pub fn name_der(src: Bytes, n: AsnName) -> Bytes []
+    todo("x509-nv.x509name.name_der")
+
+// Whether this issuer name and this subject name have the same
+// encoding.
+//
+// **The question chain building asks**, in the words it asks it.  The
+// two names usually come from two different documents, which is why
+// each arrives with the bytes it was read from.
+//
+// The comparison is over the DER, for the reason in the module
+// comment: RFC 5280 section 7.1's full matching algorithm is
+// implemented by almost nothing, and the certificates that exist were
+// issued by a CA that copied its own subject bytes across.  A caller
+// that needs the full algorithm needs a package that implements X.500
+// string preparation, and this one says so rather than approximating
+// it.
+//
+// ```novo
+// use std.bytes
+// use x509name
+// use asn1pkix
+//
+// fn main() [io]
+//     let der = bytes.zeros(0)
+//     let n = AsnName { rdns: [], span: AsnSpan { off: 0, len: 0 } }
+//     println("${x509name.issuer_matches_subject(der, n, der, n)}")
+// ```
+pub fn issuer_matches_subject(issuer_src: Bytes, issuer: AsnName, subject_src: Bytes,
+                              subject: AsnName) -> Bool []
+    todo("x509-nv.x509name.issuer_matches_subject")

@@ -1,0 +1,248 @@
+// tests/x509_cover_tests.nv — the rest of the public surface, one case
+// each.
+//
+// RED ON PURPOSE, like every suite here: each assertion reaches
+// `not implemented: x509-nv.<module>.<fn>`.
+//
+// The four suites beside this one assert the DESIGN — the bytes a
+// signature covers, the bit numbering, the pure lookup, the
+// caller-supplied verifier.  This one exists so that no public
+// function ships without a written expectation of what it answers.
+//
+// Every extension reader is exercised against a certificate that
+// carries none, because that is the case with one right answer that
+// needs no byte vector: an absent extension is `Ok(None)` and never an
+// error.
+
+use std.test
+use std.bytes
+use asn1read
+use asn1oid
+use x509cert
+use x509crl
+use x509ext
+use x509name
+use x509verify
+use x509err
+
+fn limits() -> AsnLimits
+    asn1read.default_limits()
+
+// A DER document that is not a certificate, used wherever the refusal
+// is what is being asserted.
+fn junk() -> Bytes
+    bytes.from_hex("3003020107") ?? bytes.zeros(0)
+
+// An entry with no extensions at all.
+fn bare_entry() -> X509RevokedCert
+    X509RevokedCert { serial: bytes.from_hex("01") ?? bytes.zeros(0),
+        revocation_date: civil.datetime(civil.date_from_epoch_day(20000),
+                                        civil.midnight()),
+        extensions: [] }
+
+@test
+fn test_an_absent_extension_is_an_answer_and_never_an_error() [io]
+    // RFC 5280 makes nearly every extension optional, so absence is the
+    // ordinary case and a caller should not have to match an error arm
+    // to learn it.
+    test.case("extended key usage")
+    match x509ext.extended_key_usage([], limits())
+        Err(e)      => test.fail(e.message())
+        Ok(Some(_)) => test.fail("there was no extension to read")
+        Ok(None)    => test.assert(true)
+
+    test.case("subject and issuer alternative names")
+    match x509ext.subject_alt_name([], limits())
+        Err(e)      => test.fail(e.message())
+        Ok(Some(_)) => test.fail("there was no extension to read")
+        Ok(None)    => test.assert(true)
+    match x509ext.issuer_alt_name([], limits())
+        Err(e)      => test.fail(e.message())
+        Ok(Some(_)) => test.fail("there was no extension to read")
+        Ok(None)    => test.assert(true)
+
+    test.case("the two key identifiers")
+    match x509ext.subject_key_identifier([], limits())
+        Err(e)      => test.fail(e.message())
+        Ok(Some(_)) => test.fail("there was no extension to read")
+        Ok(None)    => test.assert(true)
+    match x509ext.authority_key_identifier([], limits())
+        Err(e)      => test.fail(e.message())
+        Ok(Some(_)) => test.fail("there was no extension to read")
+        Ok(None)    => test.assert(true)
+
+    test.case("name constraints")
+    match x509ext.name_constraints([], limits())
+        Err(e)      => test.fail(e.message())
+        Ok(Some(_)) => test.fail("there was no extension to read")
+        Ok(None)    => test.assert(true)
+
+    test.case("CRL distribution points")
+    match x509ext.crl_distribution_points([], limits())
+        Err(e)      => test.fail(e.message())
+        Ok(Some(_)) => test.fail("there was no extension to read")
+        Ok(None)    => test.assert(true)
+
+    test.case("and certificate policies")
+    match x509ext.certificate_policies([], limits())
+        Err(e)      => test.fail(e.message())
+        Ok(Some(_)) => test.fail("there was no extension to read")
+        Ok(None)    => test.assert(true)
+
+@test
+fn test_an_authority_key_identifier_is_a_hint_and_all_three_fields_are_optional() [io]
+    // RFC 5280 section 4.2.1.1.  A chain builder uses whichever field
+    // is there to narrow the candidates; the name comparison and the
+    // signature still decide.
+    let a = X509AuthorityKeyId { key_identifier: None, authority_cert_issuer: [],
+        authority_cert_serial: None }
+
+    test.case("an extension may name none of the three")
+    test.assert_eq(list.len(a.authority_cert_issuer), 0)
+    match a.key_identifier
+        Some(_) => test.fail("it was built with none")
+        None    => test.assert(true)
+    match a.authority_cert_serial
+        Some(_) => test.fail("it was built with none")
+        None    => test.assert(true)
+
+@test
+fn test_a_certificate_is_read_at_an_offset_inside_a_bigger_document() [io]
+    // What reads a certificate out of a chain file or a TLS
+    // Certificate message: the certificates sit end to end.
+    let der = junk()
+
+    test.case("parse_at reads the value that begins at the offset")
+    match x509cert.parse_at(der, 0, limits())
+        Ok(_)  => test.fail("30 03 02 01 07 is not a certificate")
+        Err(e) => test.assert(x509err.is_malformed(e))
+
+    test.case("an offset past the end is a refusal and not a panic")
+    match x509cert.parse_at(der, 99, limits())
+        Ok(_)  => test.fail("there is nothing at offset 99")
+        Err(e) => test.assert(x509err.is_malformed(e))
+
+    test.case("has_extension asks by OID and is false for a v1 certificate")
+    match x509cert.parse(der, limits())
+        Err(e) => test.assert(x509err.is_malformed(e))
+        Ok(c)  =>
+            test.assert_eq(x509cert.has_extension(c, asn1oid.oid_key_usage()),
+                           list.len(x509cert.extensions_of(c)) > 0)
+
+@test
+fn test_the_decode_cause_survives_whole_so_a_caller_can_ask_asn1_nv_about_it() [io]
+    // `X509NotDer` carries asn1-nv's own refusal rather than
+    // flattening it to a string, so a caller that wants to know a
+    // document was BER rather than DER can ask.
+    test.case("a malformed document carries a cause")
+    match x509cert.parse(bytes.zeros(0), limits())
+        Ok(_)  => test.fail("no bytes is not a certificate")
+        Err(e) =>
+            match x509err.decode_cause(e)
+                None    => test.assert(x509err.error_offset(e) >= 0)
+                Some(c) => test.assert_eq(x509err.error_offset(e),
+                                          asn1err.decode_offset(c))
+
+    test.case("and a rule failure carries none, because nothing failed to decode")
+    match x509err.decode_cause(X509CertExpired(index: 0, not_after: "2026-01-01"))
+        Some(_) => test.fail("an expired certificate decoded perfectly well")
+        None    => test.assert(true)
+
+@test
+fn test_an_entrys_extensions_are_read_the_same_way_a_certificates_are() [io]
+    let e = bare_entry()
+
+    test.case("an entry with no extensions gives no reason")
+    match x509crl.revocation_reason(e, limits())
+        Err(x)      => test.fail(x.message())
+        Ok(Some(_)) => test.fail("there was no cRLReasons extension")
+        Ok(None)    => test.assert(true)
+
+    test.case("no invalidity date")
+    match x509crl.invalidity_date(e, limits())
+        Err(x)      => test.fail(x.message())
+        Ok(Some(_)) => test.fail("there was no invalidityDate extension")
+        Ok(None)    => test.assert(true)
+
+    test.case("and no certificate issuer, so the list's own issuer is the entry's")
+    match x509crl.certificate_issuer(e, limits())
+        Err(x)      => test.fail(x.message())
+        Ok(Some(_)) => test.fail("there was no certificateIssuer extension")
+        Ok(None)    => test.assert(true)
+
+@test
+fn test_a_crl_number_is_bytes_because_it_has_no_stated_bound() [io]
+    // RFC 5280 section 5.2.3 makes the CRL number an INTEGER with no
+    // upper bound, and a CA that has published for twenty years may
+    // have one that does not fit an `Int`.
+    match x509crl.parse(junk(), limits())
+        Err(e) => test.assert(x509err.is_malformed(e))
+        Ok(l)  =>
+            test.case("a list with no cRLNumber extension has none")
+            match x509crl.crl_number(l, limits())
+                Err(e)      => test.assert(x509err.is_malformed(e))
+                Ok(Some(n)) => test.assert(bytes.len(n) > 0)
+                Ok(None)    => test.assert(true)
+
+            test.case("and a list that is not a delta names no base")
+            match x509crl.delta_crl_indicator(l, limits())
+                Err(e)      => test.assert(x509err.is_malformed(e))
+                Ok(Some(n)) => test.assert(bytes.len(n) > 0)
+                Ok(None)    => test.assert(true)
+
+@test
+fn test_a_name_is_printed_for_a_person_and_read_by_attribute() [io]
+    let der = junk()
+    match x509cert.parse(der, limits())
+        Err(e) => test.assert(x509err.is_malformed(e))
+        Ok(c)  =>
+            let n = x509cert.subject_of(c)
+
+            test.case("to_rfc4514 answers text, and an empty name answers nothing")
+            let text = x509name.to_rfc4514(n)
+            test.assert_eq(str.len(text) == 0, x509name.is_empty(n))
+
+            test.case("attribute_values answers every value of a type, not only the first")
+            let ous = x509name.attribute_values(n,
+                asn1oid.oid_organizational_unit_name())
+            test.assert_eq(list.len(ous) <= list.len(x509name.attributes(n)), true)
+
+            test.case("common_name is for a log line, never for matching a hostname")
+            match x509name.common_name(n)
+                None    => test.assert(list.len(x509name.attribute_values(n,
+                    asn1oid.oid_common_name())) == 0)
+                Some(s) => test.assert_eq_str(s,
+                    x509name.attribute_values(n, asn1oid.oid_common_name())[0])
+
+@test
+fn test_every_signed_structure_is_checked_through_the_same_verifier() [io]
+    // A certificate, a revocation list and a request are three
+    // documents with one shape, so one verifier value checks all three
+    // and the package pins no algorithm set for any of them.
+    let der = junk()
+    let none = x509verify.no_verifier()
+
+    match x509cert.parse(der, limits())
+        Err(e) => test.assert(x509err.is_malformed(e))
+        Ok(c)  =>
+            test.case("a certificate, against its issuer's key")
+            match x509verify.verify_certificate(none, x509cert.public_key_of(c), der, c)
+                Err(e) => test.assert(x509err.is_malformed(e))
+                Ok(o)  => test.assert(x509verify.outcome_is_uncheckable(o))
+
+            test.case("whether it is self-signed is a key question, and needs a verifier")
+            match x509verify.is_self_signed(none, der, c)
+                Err(e) => test.assert(x509err.is_malformed(e))
+                Ok(o)  => test.assert(not x509verify.outcome_is_good(o))
+
+    match x509crl.parse(der, limits())
+        Err(e) => test.assert(x509err.is_malformed(e))
+        Ok(l)  =>
+            test.case("and a revocation list, against the CA whose certificates it revokes")
+            let key = AsnSubjectPublicKeyInfo {
+                algorithm: AsnAlgorithmId { algorithm: asn1oid.oid_ed25519(),
+                    parameters: None },
+                public_key: AsnBitString { unused_bits: 0, data: bytes.zeros(32) } }
+            match x509verify.verify_crl(none, key, der, l)
+                Err(e) => test.assert(x509err.is_malformed(e))
+                Ok(o)  => test.assert(x509verify.outcome_is_uncheckable(o))

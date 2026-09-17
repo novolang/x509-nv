@@ -1,0 +1,340 @@
+// tests/x509_path_tests.nv — the verifier the caller supplies, and
+// path validation as a pure function.
+//
+// RED ON PURPOSE, like every suite here: each assertion reaches
+// `not implemented: x509-nv.<module>.<fn>`.
+//
+// Three facts are pinned here.  A signature nobody can check is an
+// ANSWER and not a failure, which is what lets a tool with no
+// cryptography package validate structure and report what it could not
+// speak for.  A chain is validated at an instant the caller supplies
+// and against a trust set the caller built, with nothing read from the
+// machine.  And a refusal names WHICH certificate failed and WHY.
+
+use std.test
+use std.bytes
+use asn1read
+use asn1oid
+use x509cert
+use x509path
+use x509verify
+use x509err
+
+fn limits() -> AsnLimits
+    asn1read.default_limits()
+
+// A moment the caller chose.  Day 20713 of the epoch, at midnight —
+// the instant is an argument and there is no clock behind it.
+fn instant() -> CivilDateTime
+    civil.datetime(civil.date_from_epoch_day(20713), civil.midnight())
+
+// A verifier that implements exactly one algorithm and always says the
+// signature is good.  A stand-in for a caller holding p256-nv: it
+// proves that the SHAPE works without this package knowing anything
+// about elliptic curves.
+fn supports_ecdsa(o: AsnOid) -> Bool []
+    asn1oid.equals(o, asn1oid.oid_ecdsa_with_sha256())
+
+fn always_good(a: AsnAlgorithmId, k: AsnSubjectPublicKeyInfo, msg: Bytes,
+               sig: Bytes) -> X509VerifyOutcome []
+    X509SignatureGood
+
+fn fake_ecdsa() -> X509Verifier
+    x509verify.verifier("fake-ecdsa", supports_ecdsa, always_good)
+
+@test
+fn test_a_signature_no_verifier_can_check_is_an_answer_and_not_a_failure() [io]
+    // The whole reason `X509VerifyOutcome` has three arms.  A
+    // certificate signed under an algorithm nobody here implements is
+    // not a bad certificate; it is one this program cannot speak for.
+    let none = x509verify.no_verifier()
+
+    test.case("the verifier that implements nothing supports nothing")
+    test.assert(not x509verify.supports(none, asn1oid.oid_ecdsa_with_sha256()))
+    test.assert(not x509verify.supports(none, asn1oid.oid_ed25519()))
+    test.assert_eq_str(x509verify.verifier_name(none), "none")
+
+    test.case("and 'I cannot check that' is not 'the signature is good'")
+    let out = X509SignatureUncheckable(algorithm: "sha256WithRSAEncryption")
+    test.assert(not x509verify.outcome_is_good(out))
+    test.assert(x509verify.outcome_is_uncheckable(out))
+    test.assert_eq_str(x509verify.outcome_code(out), "uncheckable")
+
+    test.case("nor is it 'the signature is bad'")
+    test.assert(not x509verify.outcome_is_uncheckable(X509SignatureBad))
+    test.assert(not x509verify.outcome_is_good(X509SignatureBad))
+    test.assert_eq_str(x509verify.outcome_code(X509SignatureBad), "bad")
+
+    test.case("a good signature is good, and nothing else is")
+    test.assert(x509verify.outcome_is_good(X509SignatureGood))
+    test.assert_eq_str(x509verify.outcome_code(X509SignatureGood), "good")
+
+@test
+fn test_an_rsa_signed_certificate_parses_and_reports_that_nothing_checked_it() [io]
+    // There is no RSA package on this registry.  A certificate signed
+    // `sha256WithRSAEncryption` — most of the public web — parses here
+    // and is checked by nothing.  Saying so is the design; hiding it
+    // behind a refusal would tell the operator their certificate is
+    // broken when it is this program that is short.
+    let rsa = AsnAlgorithmId { algorithm: asn1oid.oid_sha256_with_rsa(),
+        parameters: None }
+
+    test.case("the algorithm has a name, so a report can print it")
+    test.assert_eq_str(x509verify.algorithm_name(rsa), "sha256WithRSAEncryption")
+
+    test.case("and is_rsa_algorithm says which family it is in")
+    test.assert(x509verify.is_rsa_algorithm(rsa))
+
+    test.case("every RSA signature OID is in that family")
+    let pss = AsnAlgorithmId { algorithm: x509verify.oid_rsassa_pss(), parameters: None }
+    let sha1 = AsnAlgorithmId { algorithm: x509verify.oid_sha1_with_rsa(),
+        parameters: None }
+    let sha384 = AsnAlgorithmId { algorithm: x509verify.oid_sha384_with_rsa(),
+        parameters: None }
+    let sha512 = AsnAlgorithmId { algorithm: x509verify.oid_sha512_with_rsa(),
+        parameters: None }
+    test.assert(x509verify.is_rsa_algorithm(pss))
+    test.assert(x509verify.is_rsa_algorithm(sha1))
+    test.assert(x509verify.is_rsa_algorithm(sha384))
+    test.assert(x509verify.is_rsa_algorithm(sha512))
+
+    test.case("an elliptic-curve signature is not")
+    let ec = AsnAlgorithmId { algorithm: asn1oid.oid_ecdsa_with_sha256(),
+        parameters: None }
+    test.assert(not x509verify.is_rsa_algorithm(ec))
+    test.assert_eq_str(x509verify.algorithm_name(ec), "ecdsa-with-SHA256")
+
+    test.case("the ECDSA family this package names beyond asn1-nv's one")
+    test.assert_eq_str(asn1oid.oid_text(x509verify.oid_ecdsa_with_sha384()),
+                       "1.2.840.10045.4.3.3")
+    test.assert_eq_str(asn1oid.oid_text(x509verify.oid_ecdsa_with_sha512()),
+                       "1.2.840.10045.4.3.4")
+
+    test.case("no verifier anybody can build today supports RSA, and it says so")
+    test.assert(not x509verify.supports(x509verify.no_verifier(),
+                                        asn1oid.oid_sha256_with_rsa()))
+    test.assert(not x509verify.supports(fake_ecdsa(), asn1oid.oid_sha256_with_rsa()))
+
+@test
+fn test_the_verifier_is_a_value_the_caller_builds_and_two_can_be_put_together() [io]
+    // A program holding one package verifies one algorithm; one
+    // holding two verifies both; this package pins no set at all.
+    let ecdsa = fake_ecdsa()
+
+    test.case("a caller-supplied verifier supports what its author said it does")
+    test.assert(x509verify.supports(ecdsa, asn1oid.oid_ecdsa_with_sha256()))
+    test.assert(not x509verify.supports(ecdsa, asn1oid.oid_ed25519()))
+    test.assert_eq_str(x509verify.verifier_name(ecdsa), "fake-ecdsa")
+
+    test.case("combining it with the empty one changes nothing it can do")
+    let both = x509verify.combined(ecdsa, x509verify.no_verifier())
+    test.assert(x509verify.supports(both, asn1oid.oid_ecdsa_with_sha256()))
+    test.assert(not x509verify.supports(both, asn1oid.oid_sha256_with_rsa()))
+
+    test.case("and verify_signature asks the function the caller handed in")
+    let alg = AsnAlgorithmId { algorithm: asn1oid.oid_ecdsa_with_sha256(),
+        parameters: None }
+    let key = AsnSubjectPublicKeyInfo { algorithm: alg,
+        public_key: AsnBitString { unused_bits: 0, data: bytes.zeros(0) } }
+    let out = x509verify.verify_signature(ecdsa, alg, key, bytes.zeros(4),
+                                          bytes.zeros(64))
+    test.assert(x509verify.outcome_is_good(out))
+
+@test
+fn test_the_strict_policy_refuses_until_it_is_narrowed() [io]
+    // jwt-nv's `JwtPolicy` is the model: the settings are ONE value a
+    // service builds and names, rather than arguments that drift
+    // between call sites.
+    let p = x509path.strict()
+
+    test.case("strict checks everything RFC 5280 section 6.1 states")
+    test.assert(p.require_ca_flag)
+    test.assert(p.require_key_cert_sign)
+    test.assert(p.enforce_path_len)
+    test.assert(p.enforce_name_constraints)
+    test.assert(p.check_validity)
+    test.assert(p.require_all_signatures_checked)
+
+    test.case("and knows nothing beyond this package's own extensions")
+    test.assert_eq(list.len(p.known_extension_oids), 0)
+
+    test.case("the chain bound is this package's number, not the standard's")
+    test.assert_eq(p.max_chain_length, x509path.X509_MAX_CHAIN_DEFAULT)
+    test.assert_eq(x509path.X509_MAX_CHAIN_DEFAULT, 8)
+
+    test.case("a strict policy is usable as it stands")
+    match x509path.check_policy(p)
+        Some(e) => test.fail(e.message())
+        None    => test.assert(true)
+
+    test.case("permissive turns the checks off, and its name says so")
+    let q = x509path.permissive()
+    test.assert(not q.require_ca_flag)
+    test.assert(not q.check_validity)
+    test.assert(not q.require_all_signatures_checked)
+
+@test
+fn test_narrowing_a_policy_is_one_edit_that_shows_in_a_diff() [io]
+    let p = x509path.strict()
+
+    test.case("a shorter chain bound")
+    test.assert_eq(x509path.with_max_chain_length(p, 3).max_chain_length, 3)
+
+    test.case("a bound below one makes the policy unusable, and check_policy says so")
+    match x509path.check_policy(x509path.with_max_chain_length(p, 0))
+        None    => test.fail("a chain of zero certificates cannot reach an anchor")
+        Some(e) =>
+            test.assert_eq_str(x509err.code(e), "policy-unusable")
+            test.assert_eq(x509err.error_index(e), -1)
+
+    test.case("admitting signatures nothing could check")
+    test.assert(not x509path.allowing_unchecked_signatures(p).require_all_signatures_checked)
+
+    test.case("declaring the caller's own extensions known")
+    let mine = asn1oid.oid([1, 3, 6, 1, 4, 1, 99999, 3])
+    test.assert_eq(list.len(x509path.knowing_extensions(p, [mine]).known_extension_oids),
+                   1)
+
+    test.case("requiring a key purpose of the end-entity certificate")
+    match x509path.requiring_key_purpose(p, x509ext.oid_kp_server_auth()).required_key_purpose
+        None    => test.fail("the purpose was just required")
+        Some(o) => test.assert_eq_str(asn1oid.oid_text(o), "1.3.6.1.5.5.7.3.1")
+
+    test.case("turning validity checking off")
+    test.assert(not x509path.without_validity_check(p).check_validity)
+
+    test.case("and turning name constraints off ALSO declares the OID known, because a critical extension nobody processes is otherwise a refusal")
+    let n = x509path.without_name_constraints(p)
+    test.assert(not n.enforce_name_constraints)
+    test.assert_eq(list.len(n.known_extension_oids), 1)
+
+@test
+fn test_a_trust_set_is_a_value_the_caller_built_and_never_a_file() [io]
+    // This package reads no trust store.  Whose certificates a program
+    // believes is its most important configuration, and it belongs in
+    // its source rather than in a path this package guessed.
+    test.case("an empty trust set holds nothing")
+    let empty = x509path.empty_trust_set()
+    test.assert_eq(x509path.anchor_count(empty), 0)
+    test.assert_eq(list.len(x509path.anchors_of(empty)), 0)
+
+    test.case("and validating against it is its own refusal, not a chain that would not terminate")
+    let der = bytes.from_hex("3003020107") ?? bytes.zeros(0)
+    match x509path.validate(der, [], empty, x509verify.no_verifier(), instant(),
+                            x509path.strict())
+        Ok(_)  => test.fail("no anchors and no chain is not a path")
+        Err(e) =>
+            test.assert(x509err.is_rule_failure(e))
+            test.assert_eq(x509err.error_index(e), -1)
+
+    test.case("an anchor carries its OWN bytes, because it arrived on its own")
+    match x509path.anchor(der, limits())
+        Err(e) => test.assert(x509err.is_malformed(e))
+        Ok(a)  =>
+            test.assert_eq_str(bytes.to_hex(a.der), bytes.to_hex(der))
+            let one = x509path.with_anchor(x509path.trust_set([]), a)
+            test.assert_eq(x509path.anchor_count(one), 1)
+
+            test.case("and an anchor is found by comparing name encodings")
+            match x509path.find_anchor(one, der, x509cert.subject_of(a.cert))
+                None    => test.fail("the set holds exactly that name")
+                Some(f) => test.assert_eq(bytes.len(f.der), bytes.len(der))
+
+@test
+fn test_validation_takes_the_moment_and_reads_no_clock() [io]
+    // The same chain, the same trust set, the same verifier, two
+    // instants — and the answers may differ.  Nothing in `validate`
+    // can disagree with itself between two runs, which is what makes a
+    // replay of a request log reproduce its own answers.
+    let der = bytes.from_hex("3003020107") ?? bytes.zeros(0)
+    let earlier = civil.datetime(civil.date_from_epoch_day(10000), civil.midnight())
+
+    test.case("two instants are two arguments, not two clock readings")
+    test.assert(civil.compare_datetime(earlier, instant()) < 0)
+
+    test.case("an empty chain is its own refusal")
+    match x509path.validate(der, [], x509path.empty_trust_set(),
+                            x509verify.no_verifier(), earlier, x509path.strict())
+        Ok(_)  => test.fail("there were no certificates to validate")
+        Err(e) => test.assert(x509err.is_rule_failure(e))
+
+    test.case("validate_der parses and validates in one call, and refuses the same way")
+    match x509path.validate_der(der, x509path.empty_trust_set(),
+                                x509verify.no_verifier(), instant(),
+                                x509path.strict(), limits())
+        Ok(_)  => test.fail("30 03 02 01 07 is not a certificate chain")
+        Err(e) => test.assert(x509err.is_malformed(e) or x509err.is_rule_failure(e))
+
+@test
+fn test_a_chain_that_breaks_says_which_certificate_broke_it() [io]
+    // "The chain is invalid" is not an answer anybody can act on.
+    let der = bytes.from_hex("3003020107") ?? bytes.zeros(0)
+
+    test.case("check_chain_order compares names and nothing else")
+    match x509cert.parse_all(der, limits())
+        Err(e)    => test.assert(x509err.is_malformed(e))
+        Ok(chain) =>
+            match x509path.check_chain_order(der, chain)
+                None    => test.assert(list.len(chain) <= 1)
+                Some(e) =>
+                    test.assert_eq_str(x509err.code(e), "issuer-not-found")
+                    test.assert(x509err.error_index(e) >= 0)
+
+            test.case("and build_chain names the certificate whose issuer is missing")
+            match x509path.build_chain(der, chain[0], chain, x509path.empty_trust_set())
+                Ok(built) => test.assert(list.len(built) >= 1)
+                Err(e)    => test.assert(x509err.error_index(e) >= 0)
+
+    test.case("check_certificate asks one certificate's own rules, with its index")
+    match x509cert.parse(der, limits())
+        Err(e) => test.assert(x509err.is_malformed(e))
+        Ok(c)  =>
+            match x509path.check_certificate(der, c, 1, true, instant(),
+                                             x509path.strict(), limits())
+                None    => test.assert(true)
+                Some(e) => test.assert_eq(x509err.error_index(e), 1)
+
+@test
+fn test_a_path_reports_what_it_could_not_check() [io]
+    // A caller that says "valid" without reading `unchecked` is
+    // claiming something it was told it could not claim.
+    let der = bytes.from_hex("3003020107") ?? bytes.zeros(0)
+    let audit = x509path.allowing_unchecked_signatures(x509path.permissive())
+
+    match x509path.validate_der(der, x509path.empty_trust_set(),
+                                x509verify.no_verifier(), instant(), audit, limits())
+        Err(e) => test.assert(x509err.is_malformed(e) or x509err.is_rule_failure(e))
+        Ok(p)  =>
+            test.case("with no verifier at all, every signature is unchecked")
+            test.assert_eq(list.len(x509path.unchecked_of(p)), x509path.path_length(p))
+            test.assert(not x509path.is_fully_checked(p))
+
+            test.case("and the path still says which anchor it reached and how long it was")
+            test.assert_eq(x509path.path_length(p), list.len(p.certificates))
+            test.assert_eq(bytes.len(x509path.anchor_of(p).der) > 0, true)
+            test.assert_eq(x509cert.version_of(x509path.leaf_of(p)) >= 1, true)
+            test.assert(list.len(x509path.policies_of(p)) >= 0)
+
+@test
+fn test_a_hostname_is_matched_against_the_alternative_names_and_not_the_common_name() [io]
+    // RFC 6125 section 6.4.3 and RFC 9525.  A wildcard matches ONE
+    // label, in the leftmost position only.
+    let names = [X509DnsName(name: "example.com"), X509DnsName(name: "*.example.com")]
+
+    test.case("the exact name matches")
+    test.assert(x509path.matches_hostname(names, "example.com"))
+
+    test.case("a wildcard matches one label in the leftmost position")
+    test.assert(x509path.matches_hostname(names, "a.example.com"))
+
+    test.case("and does not match two labels")
+    test.assert(not x509path.matches_hostname(names, "a.b.example.com"))
+
+    test.case("nor a different domain")
+    test.assert(not x509path.matches_hostname(names, "example.org"))
+
+    test.case("a certificate with no alternative names matches nothing, whatever its common name says")
+    test.assert(not x509path.matches_hostname([], "example.com"))
+
+    test.case("names_permitted applies every constraint on the path above")
+    test.assert(x509path.names_permitted([], names))

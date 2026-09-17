@@ -1,0 +1,639 @@
+// x509ext — the extensions RFC 5280 defines, each as a typed value.
+//
+// Every body is a `todo()`.  The signatures are the design, and the
+// compiler checks them as claims; see the README for the stamp.
+//
+// WHAT AN EXTENSION IS.  RFC 5280 section 4.2 gives a version 3
+// certificate a list of extensions, each of them three things: an
+// OBJECT IDENTIFIER saying which extension it is, a BOOLEAN saying
+// whether it is CRITICAL, and an OCTET STRING holding the extension's
+// own DER.  The structure inside that octet string depends entirely on
+// the OID, which is why a general reader can only hand it over whole
+// and why this module exists.
+//
+// THE CRITICAL FLAG IS THE ONE RULE EVERYBODY HAS TO IMPLEMENT.  RFC
+// 5280 section 4.2: "A certificate-using system MUST reject the
+// certificate if it encounters a critical extension it does not
+// recognize or a critical extension that contains information that it
+// cannot process."  The flag exists so that a CA can add a constraint
+// and be sure no old reader will quietly ignore it.  A reader that
+// skipped what it did not understand would accept a certificate
+// restricted in a way it never saw — which is the whole failure mode
+// the flag was invented to prevent.  `unknown_critical` is the one
+// call that answers "is there anything here I do not understand", and
+// `check_unknown_critical` is the refusal.
+//
+// AND "UNKNOWN" MEANS UNKNOWN TO THE PROGRAM, NOT TO THIS PACKAGE.
+// A caller that implements an extension of its own — a private one, or
+// one from a newer specification — hands its OIDs to
+// `check_unknown_critical` and they stop being unknown.  A package
+// that owned the definition of "recognized" would force every such
+// caller to either fork it or ignore the rule.
+//
+// FOUR OIDS LIVE IN ASN1-NV AND ARE NOT REPEATED HERE.
+// `asn1oid.oid_basic_constraints`, `oid_key_usage`,
+// `oid_subject_alt_name` and `oid_ext_key_usage` are published there
+// because that package names them for its own four readers.  One OID
+// has one home; a second `2.5.29.19` would make a reader wonder which
+// is authoritative.  Everything else RFC 5280 defines is named below.
+//
+// EVERY READER TAKES THE EXTENSION LIST AND ANSWERS AN OPTION.  An
+// extension that is absent is `Ok(None)` and not an error: absence is
+// the ordinary case for most of these, and a caller that had to match
+// an error arm to learn it would write the same three lines everywhere.
+// A extension that is PRESENT and malformed is
+// `Err(X509BadExtensionValue)`, naming the OID.
+//
+// EVERY TYPE HERE IS A PLAIN STRUCT.  A `@value` struct may not be a
+// `Result` payload (E2015) and every one of these is, directly or
+// inside an option.  That is a documented v1 limit, designed around
+// rather than worked around.
+
+use std.bytes
+
+// ── the extension OIDs, by name ─────────────────────────────────────
+
+// `2.5.29.14` — `id-ce-subjectKeyIdentifier`.  A short value that
+// names this certificate's public key, so that a chain builder can
+// find the issuer without comparing keys.  RFC 5280 section 4.2.1.2.
+//
+// ```novo
+// use asn1oid
+// use x509ext
+//
+// fn main() [io]
+//     println(asn1oid.oid_text(x509ext.oid_subject_key_identifier()))
+//     // 2.5.29.14
+// ```
+pub fn oid_subject_key_identifier() -> AsnOid []
+    todo("x509-nv.x509ext.oid_subject_key_identifier")
+
+// `2.5.29.35` — `id-ce-authorityKeyIdentifier`.  Names the key that
+// signed this certificate.  RFC 5280 section 4.2.1.1.
+pub fn oid_authority_key_identifier() -> AsnOid []
+    todo("x509-nv.x509ext.oid_authority_key_identifier")
+
+// `2.5.29.18` — `id-ce-issuerAltName`.  RFC 5280 section 4.2.1.7.
+pub fn oid_issuer_alt_name() -> AsnOid []
+    todo("x509-nv.x509ext.oid_issuer_alt_name")
+
+// `2.5.29.30` — `id-ce-nameConstraints`.  RFC 5280 section 4.2.1.10.
+// Appears only in a CA certificate, and MUST be critical there.
+pub fn oid_name_constraints() -> AsnOid []
+    todo("x509-nv.x509ext.oid_name_constraints")
+
+// `2.5.29.31` — `id-ce-cRLDistributionPoints`.  Where the revocation
+// list for this certificate is published.  RFC 5280 section 4.2.1.13.
+pub fn oid_crl_distribution_points() -> AsnOid []
+    todo("x509-nv.x509ext.oid_crl_distribution_points")
+
+// `2.5.29.32` — `id-ce-certificatePolicies`.  RFC 5280 section
+// 4.2.1.4.
+pub fn oid_certificate_policies() -> AsnOid []
+    todo("x509-nv.x509ext.oid_certificate_policies")
+
+// `2.5.29.32.0` — `anyPolicy`.  The policy that means "any", and the
+// one a CA writes when it asserts no particular policy at all.
+pub fn oid_any_policy() -> AsnOid []
+    todo("x509-nv.x509ext.oid_any_policy")
+
+// `2.5.29.33` — `id-ce-policyMappings`.  RFC 5280 section 4.2.1.5.
+// Named so a critical one can be recognised; the mapping algorithm
+// itself is not implemented here and the README says so.
+pub fn oid_policy_mappings() -> AsnOid []
+    todo("x509-nv.x509ext.oid_policy_mappings")
+
+// `2.5.29.36` — `id-ce-policyConstraints`.  RFC 5280 section 4.2.1.11.
+pub fn oid_policy_constraints() -> AsnOid []
+    todo("x509-nv.x509ext.oid_policy_constraints")
+
+// `2.5.29.54` — `id-ce-inhibitAnyPolicy`.  RFC 5280 section 4.2.1.14.
+pub fn oid_inhibit_any_policy() -> AsnOid []
+    todo("x509-nv.x509ext.oid_inhibit_any_policy")
+
+// `2.5.29.37.0` — `anyExtendedKeyUsage`.  A key usable for every
+// purpose, and the value `has_key_purpose` honours so that a caller
+// does not have to know the rule.
+pub fn oid_any_extended_key_usage() -> AsnOid []
+    todo("x509-nv.x509ext.oid_any_extended_key_usage")
+
+// `1.3.6.1.5.5.7.3.1` — `id-kp-serverAuth`.  The purpose a TLS server
+// certificate must carry.  RFC 5280 section 4.2.1.12.
+pub fn oid_kp_server_auth() -> AsnOid []
+    todo("x509-nv.x509ext.oid_kp_server_auth")
+
+// `1.3.6.1.5.5.7.3.2` — `id-kp-clientAuth`.
+pub fn oid_kp_client_auth() -> AsnOid []
+    todo("x509-nv.x509ext.oid_kp_client_auth")
+
+// `1.3.6.1.5.5.7.3.3` — `id-kp-codeSigning`.
+pub fn oid_kp_code_signing() -> AsnOid []
+    todo("x509-nv.x509ext.oid_kp_code_signing")
+
+// `1.3.6.1.5.5.7.3.4` — `id-kp-emailProtection`.
+pub fn oid_kp_email_protection() -> AsnOid []
+    todo("x509-nv.x509ext.oid_kp_email_protection")
+
+// `1.3.6.1.5.5.7.3.8` — `id-kp-timeStamping`.
+pub fn oid_kp_time_stamping() -> AsnOid []
+    todo("x509-nv.x509ext.oid_kp_time_stamping")
+
+// `1.3.6.1.5.5.7.3.9` — `id-kp-OCSPSigning`.  Named so that a reader
+// can recognise a responder's certificate; OCSP itself is not in this
+// package and the README says where it would go.
+pub fn oid_kp_ocsp_signing() -> AsnOid []
+    todo("x509-nv.x509ext.oid_kp_ocsp_signing")
+
+// Every extension OID this package reads, in one list.
+//
+// What `unknown_critical` measures an extension against, published so
+// a caller can see the set rather than infer it, and so a test can
+// assert that the set did not shrink between releases.
+pub fn known_oids() -> [AsnOid] []
+    todo("x509-nv.x509ext.known_oids")
+
+// ── finding one ─────────────────────────────────────────────────────
+
+// The extension with this OID, or `None`.
+//
+// RFC 5280 section 4.2 forbids a certificate from carrying two
+// extensions with one OID, so the first match is the only match; a
+// document that breaks the rule is caught by
+// `x509cert.check_conformance` rather than silently half-read here.
+//
+// ```novo
+// use asn1oid
+// use x509ext
+//
+// fn main() [io]
+//     match x509ext.find([], asn1oid.oid_key_usage())
+//         Some(_) => println("present")
+//         None    => println("absent")
+// ```
+pub fn find(exts: [AsnExtension], o: AsnOid) -> ?AsnExtension []
+    todo("x509-nv.x509ext.find")
+
+// Whether the extension with this OID is present and marked critical.
+//
+// False when it is absent, which is the answer a caller wants: "is
+// this constraint being imposed on me".
+pub fn is_critical(exts: [AsnExtension], o: AsnOid) -> Bool []
+    todo("x509-nv.x509ext.is_critical")
+
+// Every critical extension whose OID is neither in `known_oids` nor in
+// `also_known`.
+//
+// **The list a conforming implementation must act on**, RFC 5280
+// section 4.2.  `also_known` is the caller's own: a program that
+// implements a private extension names it here and stops being
+// required to refuse it.
+pub fn unknown_critical(exts: [AsnExtension], also_known: [AsnOid]) -> [AsnExtension] []
+    todo("x509-nv.x509ext.unknown_critical")
+
+// The refusal an unknown critical extension produces, or `None` when
+// there is none.
+//
+// `X509UnknownCriticalExtension`, naming `index` — which certificate
+// of the chain — and the OID as dotted text.  The first one found; a
+// certificate with two is refused for the first and the second is
+// irrelevant, because the certificate is already refused.
+//
+// ```novo
+// use x509ext
+//
+// fn main() [io]
+//     match x509ext.check_unknown_critical([], 0, [])
+//         Some(e) => println(e.message())
+//         None    => println("nothing unrecognised")
+// ```
+pub fn check_unknown_critical(exts: [AsnExtension], index: Int,
+                              also_known: [AsnOid]) -> ?X509Error []
+    todo("x509-nv.x509ext.check_unknown_critical")
+
+// ── basic constraints, RFC 5280 section 4.2.1.9 ─────────────────────
+
+// Whether this certificate may sign other certificates, and how many
+// may sit below it.
+//
+// The extension a certificate needs before anything it signed can be
+// trusted.  Its absence means the certificate is an end-entity one,
+// and a reader that treated a missing extension as permission is the
+// bug that made this the most quoted section of RFC 5280.
+pub struct X509BasicConstraints
+    // Whether the subject is a certificate authority.
+    is_ca: Bool
+    // How many non-self-issued certificates may sit between this one
+    // and an end-entity certificate.  -1 when the field was absent,
+    // which means unlimited.  -1 rather than an option because every
+    // caller of this compares it against a depth.
+    //
+    // The field is meaningful only when `is_ca` is true and the
+    // certificate's `keyUsage` permits `keyCertSign`.
+    path_len: Int
+
+// The `basicConstraints` extension, or `None` when it is absent.
+//
+// ```novo
+// use asn1read
+// use x509ext
+//
+// fn main() [io]
+//     match x509ext.basic_constraints([], asn1read.default_limits())
+//         Err(e)       => println(e.message())
+//         Ok(Some(bc)) => println("${bc.is_ca} ${bc.path_len}")
+//         Ok(None)     => println("an end-entity certificate")
+// ```
+pub fn basic_constraints(exts: [AsnExtension],
+                         limits: AsnLimits) -> Result<?X509BasicConstraints, X509Error> []
+    todo("x509-nv.x509ext.basic_constraints")
+
+// Whether the certificate's extensions say it is a certificate
+// authority.
+//
+// False when `basicConstraints` is absent, which is what RFC 5280
+// section 4.2.1.9 means by its absence.
+pub fn is_ca(exts: [AsnExtension], limits: AsnLimits) -> Result<Bool, X509Error> []
+    todo("x509-nv.x509ext.is_ca")
+
+// ── key usage, RFC 5280 section 4.2.1.3 ─────────────────────────────
+
+// Bit 0, `digitalSignature`.  The numbers are the ASN.1 module's own,
+// counting from the most significant bit of the first content byte,
+// and they are published as constants so that a caller reading the
+// specification and a caller reading this package use one numbering.
+pub const X509_KU_DIGITAL_SIGNATURE = 0
+
+// Bit 1, `nonRepudiation` — renamed `contentCommitment` in X.509 and
+// still encoded in the same place.
+pub const X509_KU_NON_REPUDIATION = 1
+
+// Bit 2, `keyEncipherment`.
+pub const X509_KU_KEY_ENCIPHERMENT = 2
+
+// Bit 3, `dataEncipherment`.
+pub const X509_KU_DATA_ENCIPHERMENT = 3
+
+// Bit 4, `keyAgreement`.
+pub const X509_KU_KEY_AGREEMENT = 4
+
+// Bit 5, `keyCertSign`.  **The bit a CA must have** before a
+// certificate it signed can be accepted.
+pub const X509_KU_KEY_CERT_SIGN = 5
+
+// Bit 6, `cRLSign`.  The bit a CRL's issuer must have.
+pub const X509_KU_CRL_SIGN = 6
+
+// Bit 7, `encipherOnly`.  Meaningful only when `keyAgreement` is also
+// set; on its own it says nothing.
+pub const X509_KU_ENCIPHER_ONLY = 7
+
+// Bit 8, `decipherOnly`.  The ninth bit, and the reason a key usage
+// value needs two content bytes.
+pub const X509_KU_DECIPHER_ONLY = 8
+
+// The nine key-usage bits, read.
+//
+// Named fields as well as `key_usage_bit`, because a program that
+// checks one purpose reads better naming it and a program that loops
+// over the nine reads better numbering them.  The fields are in the
+// standard's own order, so the struct is the ASN.1 module written out.
+pub struct X509KeyUsage
+    // Bit 0.  The key may verify a signature for a purpose other than
+    // certificates and revocation lists.
+    digital_signature: Bool
+    // Bit 1.  The key may verify a signature used to prove a
+    // commitment, with the non-repudiation service that implies.
+    non_repudiation: Bool
+    // Bit 2.  The key may encipher another key.
+    key_encipherment: Bool
+    // Bit 3.  The key may encipher data directly, which is rare.
+    data_encipherment: Bool
+    // Bit 4.  The key may take part in a key agreement.
+    key_agreement: Bool
+    // Bit 5.  The key may verify a signature on a CERTIFICATE.  A CA
+    // without this bit has signed nothing anybody should accept.
+    key_cert_sign: Bool
+    // Bit 6.  The key may verify a signature on a revocation list.
+    crl_sign: Bool
+    // Bit 7.  Only for enciphering, during key agreement.  Meaningless
+    // unless `key_agreement` is set.
+    encipher_only: Bool
+    // Bit 8.  Only for deciphering, during key agreement.
+    decipher_only: Bool
+
+// The `keyUsage` extension, or `None` when it is absent.
+//
+// Absence means the key is unrestricted, which is the opposite of what
+// `basicConstraints`'s absence means and is the pair of rules most
+// often confused.
+pub fn key_usage(exts: [AsnExtension], limits: AsnLimits) -> Result<?X509KeyUsage, X509Error> []
+    todo("x509-nv.x509ext.key_usage")
+
+// The nine bits out of a BIT STRING, numbered as RFC 5280 section
+// 4.2.1.3 numbers them.
+//
+// Published separately because a caller holding a BIT STRING from
+// `asn1pkix.key_usage` has the same nine bits and should not have to
+// re-derive the numbering.  A bit past the end of a short BIT STRING
+// is false, which is what a two-bit key usage means.
+pub fn key_usage_of_bits(b: AsnBitString) -> X509KeyUsage []
+    todo("x509-nv.x509ext.key_usage_of_bits")
+
+// Whether the bit with this RFC 5280 number is set.
+//
+// `x509ext.key_usage_bit(k, X509_KU_KEY_CERT_SIGN)` is the question
+// path validation asks.  A number outside `0 ..= 8` is false rather
+// than a refusal: a caller looping over a range wants "not set".
+//
+// ```novo
+// use x509ext
+// use asn1univ
+//
+// fn main() [io]
+//     let ku = x509ext.key_usage_of_bits(AsnBitString { unused_bits: 7,
+//         data: bytes.from_byte_list([4]) })
+//     println("${x509ext.key_usage_bit(ku, 5)}")   // true — keyCertSign
+// ```
+pub fn key_usage_bit(k: X509KeyUsage, bit: Int) -> Bool []
+    todo("x509-nv.x509ext.key_usage_bit")
+
+// The ASN.1 module's own name for a key-usage bit — `"keyCertSign"`,
+// `"digitalSignature"` — or `""` for a number outside `0 ..= 8`.
+//
+// For a report, and for a refusal that has to say which bit was
+// missing in the words the specification uses.
+pub fn key_usage_name(bit: Int) -> Str []
+    todo("x509-nv.x509ext.key_usage_name")
+
+// ── extended key usage, RFC 5280 section 4.2.1.12 ───────────────────
+
+// The purposes in the `extKeyUsage` extension, or `None` when it is
+// absent.
+//
+// Absence means no restriction beyond `keyUsage`.  A list of OIDs
+// rather than an enum, because the set is open by design: anybody may
+// define a purpose, and an enum would turn every new one into a
+// release of this package.
+pub fn extended_key_usage(exts: [AsnExtension],
+                          limits: AsnLimits) -> Result<?[AsnOid], X509Error> []
+    todo("x509-nv.x509ext.extended_key_usage")
+
+// Whether a purpose is permitted by a list of extended key usages.
+//
+// True when the list holds the purpose, and true when it holds
+// `anyExtendedKeyUsage` — which is the rule a caller comparing OIDs by
+// hand forgets.
+//
+// ```novo
+// use x509ext
+//
+// fn main() [io]
+//     println("${x509ext.has_key_purpose([], x509ext.oid_kp_server_auth())}")
+// ```
+pub fn has_key_purpose(purposes: [AsnOid], purpose: AsnOid) -> Bool []
+    todo("x509-nv.x509ext.has_key_purpose")
+
+// ── general names, RFC 5280 section 4.2.1.6 ─────────────────────────
+
+// One name out of a `GeneralName` CHOICE.
+//
+// The CHOICE has nine alternatives and this enum has eight arms plus a
+// catch-all, because `x400Address` and `ediPartyName` are structures
+// nothing on the public internet writes and a package that parsed them
+// would be carrying two more grammars for no caller.  They arrive as
+// `X509UnsupportedName` with their tag and their bytes, so a reader
+// can say what it saw.
+pub enum X509GeneralName
+    // `[2] dNSName`, an IA5String.  **Where a certificate's hostnames
+    // live.**  A reader that matched a hostname against the common
+    // name instead has been wrong since RFC 6125 in 2011.
+    X509DnsName(name: Str)
+    // `[7] iPAddress`, an OCTET STRING: four bytes for IPv4, sixteen
+    // for IPv6.  Bytes and not text, because that is how it is
+    // compared and because a name constraint carries an address and a
+    // mask of twice the length.
+    X509IpAddress(octets: Bytes)
+    // `[1] rfc822Name`, an IA5String holding an email address.
+    X509EmailAddress(address: Str)
+    // `[6] uniformResourceIdentifier`, an IA5String.
+    X509Uri(uri: Str)
+    // `[4] directoryName`, a distinguished name.  How a name
+    // constraint restricts a subtree of a directory.
+    X509DirectoryName(name: AsnName)
+    // `[8] registeredID`, an OBJECT IDENTIFIER.
+    X509RegisteredId(oid: AsnOid)
+    // `[0] otherName`, a type-and-value pair.  The value is its DER,
+    // whole, because its structure is the type OID's business.
+    X509OtherName(oid: AsnOid, value: Bytes)
+    // `[3] x400Address` or `[5] ediPartyName`, carried as the tag
+    // number and the bytes.  Named rather than dropped, so a name
+    // constraint over one is a refusal and not an oversight.
+    X509UnsupportedName(tag: Int, value: Bytes)
+
+// The `subjectAltName` extension, or `None` when it is absent.
+//
+// RFC 5280 section 4.1.2.6: when the subject is an empty name this
+// extension MUST be present and MUST be critical.
+pub fn subject_alt_name(exts: [AsnExtension],
+                        limits: AsnLimits) -> Result<?[X509GeneralName], X509Error> []
+    todo("x509-nv.x509ext.subject_alt_name")
+
+// The `issuerAltName` extension, or `None`.
+pub fn issuer_alt_name(exts: [AsnExtension],
+                       limits: AsnLimits) -> Result<?[X509GeneralName], X509Error> []
+    todo("x509-nv.x509ext.issuer_alt_name")
+
+// Every DNS name in a list of general names, in order.
+//
+// The call a program matching a hostname makes.
+pub fn dns_names(names: [X509GeneralName]) -> [Str] []
+    todo("x509-nv.x509ext.dns_names")
+
+// Every IP address in a list of general names, as its four or sixteen
+// bytes.
+pub fn ip_addresses(names: [X509GeneralName]) -> [Bytes] []
+    todo("x509-nv.x509ext.ip_addresses")
+
+// A general name as one line of text, for a report: `"DNS:example.com"`,
+// `"IP:192.0.2.1"`, `"email:ca@example.com"`, `"URI:http://..."`,
+// `"DirName:CN=Acme"`.
+//
+// The prefixes are the ones OpenSSL prints, because an operator
+// comparing this package's output against a certificate dump should
+// not have to translate.
+pub fn general_name_text(n: X509GeneralName) -> Str []
+    todo("x509-nv.x509ext.general_name_text")
+
+// ── key identifiers, RFC 5280 sections 4.2.1.1 and 4.2.1.2 ──────────
+
+// The `authorityKeyIdentifier` extension's three optional fields.
+//
+// All three are optional in the encoding, and a conforming extension
+// carries the key identifier or both of the other two.  A chain
+// builder uses whichever is there as a HINT: it narrows the candidate
+// issuers, and the name comparison and the signature check still
+// decide.
+pub struct X509AuthorityKeyId
+    // The issuer's `subjectKeyIdentifier`, when it is named.
+    key_identifier: ?Bytes
+    // The issuer's own issuer, when it is named.  Empty when it is
+    // not.
+    authority_cert_issuer: [X509GeneralName]
+    // The issuer's own serial number, when it is named.
+    authority_cert_serial: ?Bytes
+
+// The `subjectKeyIdentifier` extension's value, or `None`.
+//
+// Usually the SHA-1 digest of the public key's BIT STRING, which RFC
+// 5280 section 4.2.1.2 gives as one of two suggested methods — but the
+// value is whatever the CA chose, and a reader that recomputed it and
+// compared would reject certificates that are perfectly valid.
+pub fn subject_key_identifier(exts: [AsnExtension],
+                              limits: AsnLimits) -> Result<?Bytes, X509Error> []
+    todo("x509-nv.x509ext.subject_key_identifier")
+
+// The `authorityKeyIdentifier` extension, or `None`.
+pub fn authority_key_identifier(exts: [AsnExtension],
+                                limits: AsnLimits) -> Result<?X509AuthorityKeyId, X509Error> []
+    todo("x509-nv.x509ext.authority_key_identifier")
+
+// ── name constraints, RFC 5280 section 4.2.1.10 ─────────────────────
+
+// One subtree a name constraint permits or excludes.
+pub struct X509GeneralSubtree
+    // The name the subtree is rooted at.  A DNS name constrains that
+    // name and every name below it; an IP address carries the address
+    // and a mask of the same length after it; a directory name
+    // constrains every name that begins with it.
+    base: X509GeneralName
+    // RFC 5280 requires this to be 0 and a conforming CA writes
+    // nothing.  Carried so a reader can see a non-conforming value
+    // rather than silently applying a constraint it did not read.
+    minimum: Int
+    // RFC 5280 requires this to be absent, which is -1 here.
+    maximum: Int
+
+// The `nameConstraints` extension: what the subtree below this CA may
+// be named.
+//
+// Either list may be empty, and both being empty is a certificate that
+// permits nothing — RFC 5280 forbids an extension with neither field.
+pub struct X509NameConstraints
+    // The subtrees a name must fall inside.  Empty means unrestricted
+    // rather than "nothing permitted": a constraint that named no
+    // permitted subtree is one that only excludes.
+    permitted: [X509GeneralSubtree]
+    // The subtrees a name must fall outside.  An exclusion beats a
+    // permission.
+    excluded: [X509GeneralSubtree]
+
+// The `nameConstraints` extension, or `None`.
+//
+// Appears only in a CA certificate, where RFC 5280 requires it to be
+// critical — which means a reader that does not implement it must
+// refuse the certificate rather than ignore the constraint.  That is
+// why `x509path`'s policy can turn the check off only by also
+// declaring the OID known, and why the README says what turning it off
+// costs.
+pub fn name_constraints(exts: [AsnExtension],
+                        limits: AsnLimits) -> Result<?X509NameConstraints, X509Error> []
+    todo("x509-nv.x509ext.name_constraints")
+
+// Whether a name falls inside a subtree.
+//
+// The matching rule is the name form's own: a DNS name matches the
+// subtree and every name below it, so `example.com` covers
+// `a.example.com` and not `notexample.com`; an email address matches a
+// host, a domain below it, or a full address; an IP address is
+// compared under the mask that follows it; a directory name matches
+// any name beginning with the subtree's relative names.
+pub fn subtree_contains(subtree: X509GeneralSubtree, name: X509GeneralName) -> Bool []
+    todo("x509-nv.x509ext.subtree_contains")
+
+// Whether a constraint permits a name: inside some permitted subtree
+// of its own form, and inside no excluded one.
+//
+// A name of a form the permitted list never mentions is PERMITTED,
+// which is RFC 5280 section 4.2.1.10's rule and the one that surprises
+// people: constraining DNS names says nothing about email addresses.
+pub fn constraints_permit(c: X509NameConstraints, name: X509GeneralName) -> Bool []
+    todo("x509-nv.x509ext.constraints_permit")
+
+// ── CRL distribution points, RFC 5280 section 4.2.1.13 ──────────────
+
+// One place a revocation list for this certificate is published.
+pub struct X509DistributionPoint
+    // The names the point is published at — an HTTP URI in almost
+    // every certificate that has one.  Fetching it is `[net]` work
+    // that belongs in a `host` package; this one reads the address and
+    // stops.
+    full_name: [X509GeneralName]
+    // The relative name, when the point is named relative to the CRL
+    // issuer rather than absolutely.  Empty when it is not.
+    relative_name: [AsnAttribute]
+    // Who issues the list, when it is not this certificate's own
+    // issuer — an INDIRECT CRL.  Empty when it is.
+    crl_issuer: [X509GeneralName]
+    // The `ReasonFlags` bits this point covers, or -1 when the field
+    // was absent, which means every reason.  A point that covers some
+    // reasons is a point that does not answer the question on its own.
+    reasons: Int
+
+// The `cRLDistributionPoints` extension, or `None`.
+pub fn crl_distribution_points(exts: [AsnExtension],
+                               limits: AsnLimits) -> Result<?[X509DistributionPoint], X509Error> []
+    todo("x509-nv.x509ext.crl_distribution_points")
+
+// Every URI a distribution point names, in order.
+//
+// The list a program that fetches revocation lists walks.
+pub fn distribution_point_uris(p: X509DistributionPoint) -> [Str] []
+    todo("x509-nv.x509ext.distribution_point_uris")
+
+// ── certificate policies, RFC 5280 section 4.2.1.4 ──────────────────
+
+// One qualifier on one policy.
+pub struct X509PolicyQualifier
+    // `1.3.6.1.5.5.7.2.1` for a certification practice statement URI,
+    // `1.3.6.1.5.5.7.2.2` for a user notice.
+    oid: AsnOid
+    // The qualifier's own DER, whole.  RFC 5280 section 4.2.1.4 warns
+    // against relying on qualifiers, and a package that parsed the
+    // user-notice grammar would be carrying it for nobody.
+    value: Bytes
+
+// One policy a certificate asserts.
+pub struct X509PolicyInfo
+    // The policy's OID.  `anyPolicy` is `2.5.29.32.0`.
+    oid: AsnOid
+    // Its qualifiers, in order.  Usually empty.
+    qualifiers: [X509PolicyQualifier]
+
+// The `certificatePolicies` extension, or `None`.
+//
+// The policies are read; the policy PROCESSING of RFC 5280 section 6.1
+// — the valid-policy tree, policy mapping, the inhibit and require
+// counters — is not implemented, and the README names it as missing
+// rather than half-doing it.  `x509path` reports the policies each
+// certificate asserted and lets a caller decide.
+pub fn certificate_policies(exts: [AsnExtension],
+                            limits: AsnLimits) -> Result<?[X509PolicyInfo], X509Error> []
+    todo("x509-nv.x509ext.certificate_policies")
+
+// Whether a list of policies holds this one, honouring `anyPolicy`.
+//
+// True when the list names the policy, and true when it names
+// `2.5.29.32.0`.
+pub fn asserts_policy(policies: [X509PolicyInfo], o: AsnOid) -> Bool []
+    todo("x509-nv.x509ext.asserts_policy")
+
+// ── the raw value ───────────────────────────────────────────────────
+
+// The extension's own DER, whole and unparsed.
+//
+// What a caller reads an extension this package does not name with,
+// and what it hands to `asn1read` to walk itself.  It is also what a
+// caller re-emits: an extension's bytes are inside the signed region,
+// so re-encoding a parsed one would change the signature.
+pub fn extension_value(e: AsnExtension) -> Bytes []
+    todo("x509-nv.x509ext.extension_value")

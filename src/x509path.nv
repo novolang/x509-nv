@@ -1,0 +1,500 @@
+// x509path — path validation as a pure function.
+//
+// Every body is a `todo()`.  The signatures are the design, and the
+// compiler checks them as claims; see the README for the stamp.
+//
+// WHAT PATH VALIDATION IS.  A certificate on its own says nothing.  It
+// becomes meaningful when there is a chain from it to something the
+// reader already trusts: certificate 0 was issued by certificate 1,
+// which was issued by certificate 2, which was issued by a TRUST
+// ANCHOR the reader was configured with.  RFC 5280 section 6 states
+// the algorithm: walk the chain from the anchor down, and at every
+// step check the signature, the validity period, the names, the basic
+// constraints, the key usage and the name constraints.
+//
+// AND HERE IT IS A PURE FUNCTION.  `validate` reads no clock, opens no
+// file and makes no network call.  Everything arrives as an argument:
+//
+//   the chain        — certificates the caller parsed
+//   the trust set    — anchors the caller built, from wherever it
+//                      keeps them
+//   the verifier     — the caller's signature check, or none
+//   the instant      — the moment the caller read from its own clock
+//   the policy       — what the caller's rules are, as ONE value
+//
+// Three by-products are worth naming, because they are what the shape
+// is for.  A test validates a chain at any instant with no fake clock
+// and no injected time source.  An audit tool asks whether a
+// certificate was valid when it was PRESENTED — six weeks ago, in a
+// request log — rather than only whether it is valid now.  And a
+// replay of that log gives exactly the answers it gave the first time,
+// because there is nothing in the function for the second run to
+// disagree with.  It is the same shape jwt-nv's `JwtInstant` takes for
+// the same reason.
+//
+// THE POLICY IS A VALUE, NOT A PILE OF OPTIONAL ARGUMENTS.  Every
+// setting below is a decision somebody has to make about what their
+// program accepts, and settings that live in a call's arguments drift
+// between call sites until nobody can say what the program accepts.  A
+// service builds one policy, names it, and hands the same one
+// everywhere — so "what do we accept" has a definition, a place in the
+// source and a diff when it changes.  jwt-nv's `JwtPolicy` is the
+// model, `strict()` is deliberately awkward, and narrowing it is the
+// one moment somebody looks.
+//
+// THE REFUSAL NAMES WHICH CERTIFICATE AND WHY.  "The chain is invalid"
+// is not an answer anybody can act on.  Every rule failure carries the
+// index of the certificate in the chain — 0 for the end-entity
+// certificate, counting up towards the anchor — and `x509err.code`
+// gives the reason as a stable token.
+//
+// ONE BUFFER HOLDS THE CHAIN.  Every certificate in `chain` carries
+// spans into `src`, so they must all have been parsed out of the same
+// bytes — which is what `x509cert.parse_all` produces and what a TLS
+// Certificate message is.  An ANCHOR is different: it arrived on its
+// own, from a trust store, so `X509Anchor` carries its own bytes.
+
+use std.bytes
+
+// The chain length `strict()` bounds a path at.
+//
+// Eight certificates below the anchor, which is more than any chain in
+// public use and less than a graph somebody built to be walked
+// forever.  A bound of this package's choosing and not a rule of RFC
+// 5280, which is why `with_max_chain_length` exists.
+pub const X509_MAX_CHAIN_DEFAULT = 8
+
+// A trust anchor: a certificate the caller has decided to believe
+// without checking anything above it.
+//
+// It carries its OWN bytes.  An anchor comes from a trust store, a
+// configuration file or a device's provisioning, so its spans point
+// into those bytes rather than into the chain being validated.
+pub struct X509Anchor
+    // The anchor's DER, whole.  Every span in `cert` points into this.
+    der: Bytes
+    // The anchor's certificate, parsed.  A whole certificate rather
+    // than a name and a key, because an anchor may carry name
+    // constraints that apply to everything below it, and a validation
+    // that ignored them would ignore the main reason a private CA is
+    // constrained at all.
+    cert: X509Cert
+
+// The anchors a validation may terminate at.
+//
+// A value the caller builds: this package never reads a trust store,
+// because reading one is `[io]` and because whose certificates a
+// program believes is the most important configuration it has and
+// should be visible in its source.
+pub struct X509TrustSet
+    // The anchors, in no particular order.  A validation tries every
+    // one whose subject name matches.
+    anchors: [X509Anchor]
+
+// What a validation checks, as one value.
+//
+// Built from `strict()` and narrowed, or — rarely and visibly — from
+// `permissive()`.  Carried by value: two services in one program hold
+// different policies and neither can change the other's.
+pub struct X509PathPolicy
+    // The most certificates that may sit below the anchor.
+    // `X509_MAX_CHAIN_DEFAULT` in `strict()`.
+    max_chain_length: Int
+    // Whether every certificate that signed another must carry
+    // `basicConstraints` with the CA flag set.  `true` in `strict()`,
+    // and RFC 5280 section 6.1.4 requires it.
+    require_ca_flag: Bool
+    // Whether every certificate that signed another must carry
+    // `keyUsage` with `keyCertSign`.  `true` in `strict()`.  A CA
+    // whose key usage forbids signing certificates has signed nothing
+    // anybody should accept.
+    require_key_cert_sign: Bool
+    // Whether `basicConstraints.pathLenConstraint` is enforced.
+    // `true` in `strict()`.
+    enforce_path_len: Bool
+    // Whether `nameConstraints` extensions are applied to every
+    // certificate below the one that carries them.  `true` in
+    // `strict()`.
+    //
+    // Turning it off is the one setting that is nearly always wrong: a
+    // name constraint is a CRITICAL extension, so a reader that does
+    // not apply it is required by RFC 5280 section 4.2 to refuse the
+    // certificate instead.  `without_name_constraints` therefore also
+    // has to declare the OID known, and says so.
+    enforce_name_constraints: Bool
+    // Whether every certificate's validity period is checked against
+    // the instant.  `true` in `strict()`.  `false` is for a tool
+    // inspecting an expired chain on purpose.
+    check_validity: Bool
+    // Whether a signature no verifier could check is a refusal.
+    // `true` in `strict()`.
+    //
+    // `false` is what an inventory tool passes: the path validates,
+    // and every index it could not check is in `X509Path.unchecked`
+    // for the caller to read.  It is the setting that makes
+    // `x509verify.no_verifier` useful rather than merely possible.
+    require_all_signatures_checked: Bool
+    // Extension OIDs the CALLER implements, beyond the ones this
+    // package reads.  A critical extension named here is not unknown.
+    // Empty in `strict()`.
+    known_extension_oids: [AsnOid]
+    // An extended key usage the end-entity certificate must carry, or
+    // `None` for no requirement.  `None` in `strict()`, because the
+    // purpose depends on what the program is doing and this package
+    // cannot guess.
+    required_key_purpose: ?AsnOid
+
+// The validated path.
+//
+// What `validate` answers on success, and it carries more than "yes":
+// a caller usually needs to know what it got, not only that it got
+// something.
+pub struct X509Path
+    // The chain as validated, the end-entity certificate first and the
+    // certificate the anchor issued last.  The anchor itself is not in
+    // this list; `anchor` is.
+    certificates: [X509Cert]
+    // The anchor the path terminated at.  Which anchor it was matters:
+    // a program with an internal CA and a public one wants to know
+    // which of them vouched for a peer.
+    anchor: X509Anchor
+    // The index of every certificate whose signature no verifier could
+    // check, in chain order.  **Empty when every signature was
+    // checked**, and non-empty only under a policy that allows it.
+    //
+    // A caller that reports "valid" without reading this is claiming
+    // something it was told it could not claim.
+    unchecked: [Int]
+    // Every policy OID asserted by every certificate on the path.  The
+    // policy PROCESSING of RFC 5280 section 6.1 — the valid-policy
+    // tree, mapping, the inhibit counters — is not implemented, and
+    // this is what is offered instead: the facts, for a caller that
+    // has a rule about them.
+    policies: [AsnOid]
+    // How many certificates sit below the anchor.  The length
+    // `max_chain_length` bounds.
+    length: Int
+
+// ── the trust set ───────────────────────────────────────────────────
+
+// An anchor from a certificate's DER.
+//
+// The bytes are kept inside the anchor, so a caller may drop its own
+// copy.  `X509NotDer` when the bytes are not a certificate.
+//
+// ```novo
+// use std.bytes
+// use asn1read
+// use x509path
+//
+// fn main() [io]
+//     let der = bytes.zeros(0)
+//     match x509path.anchor(der, asn1read.default_limits())
+//         Ok(a)  => println("${a.cert.version}")
+//         Err(e) => println(e.message())
+// ```
+pub fn anchor(der: Bytes, limits: AsnLimits) -> Result<X509Anchor, X509Error> []
+    todo("x509-nv.x509path.anchor")
+
+// A trust set from anchors the caller built.
+pub fn trust_set(anchors: [X509Anchor]) -> X509TrustSet []
+    todo("x509-nv.x509path.trust_set")
+
+// A trust set with no anchors in it.
+//
+// Every validation against it fails with `X509EmptyTrustSet`, which is
+// a configuration mistake with its own name rather than a chain that
+// mysteriously would not terminate.
+pub fn empty_trust_set() -> X509TrustSet []
+    todo("x509-nv.x509path.empty_trust_set")
+
+// The anchors, in the order they were given.
+pub fn anchors_of(t: X509TrustSet) -> [X509Anchor] []
+    todo("x509-nv.x509path.anchors_of")
+
+// How many anchors the set holds.
+pub fn anchor_count(t: X509TrustSet) -> Int []
+    todo("x509-nv.x509path.anchor_count")
+
+// A trust set with one more anchor.
+//
+// Answers a new set; the old one is unchanged, so a program that
+// builds a base set and two variants of it holds three independent
+// values.
+pub fn with_anchor(t: X509TrustSet, a: X509Anchor) -> X509TrustSet []
+    todo("x509-nv.x509path.with_anchor")
+
+// The first anchor whose subject name encoding equals this issuer
+// name, or `None`.
+//
+// The comparison is over the DER, which is why the issuer arrives with
+// the bytes it was read from.
+pub fn find_anchor(t: X509TrustSet, src: Bytes, issuer: AsnName) -> ?X509Anchor []
+    todo("x509-nv.x509path.find_anchor")
+
+// ── the policy ──────────────────────────────────────────────────────
+
+// The policy that checks everything.
+//
+// A chain bounded at `X509_MAX_CHAIN_DEFAULT`, a CA flag required, a
+// `keyCertSign` bit required, path lengths enforced, name constraints
+// enforced, validity checked against the instant, every signature
+// required to have been checked, no extension known beyond this
+// package's own, and no key purpose required.
+//
+// It is the starting point, and narrowing it is deliberate work: each
+// call below turns one check off or adds one requirement, and the diff
+// says which.
+//
+// ```novo
+// use x509path
+//
+// fn main() [io]
+//     println("${x509path.strict().require_ca_flag}")   // true
+// ```
+pub fn strict() -> X509PathPolicy []
+    todo("x509-nv.x509path.strict")
+
+// **A policy that checks the shape of a chain and almost nothing
+// else.**
+//
+// No CA flag, no key usage, no path lengths, no name constraints, no
+// validity, and unchecked signatures allowed.  The chain must still
+// reach an anchor and the names must still match, because a "path"
+// that did not would not be a path.
+//
+// It is for a certificate viewer, a linter or a migration reading
+// chains whose anchors expired years ago.  It is not for anything that
+// decides whether to trust a peer, and the name is what it is so that
+// a reviewer meeting it in a request path asks why.
+pub fn permissive() -> X509PathPolicy []
+    todo("x509-nv.x509path.permissive")
+
+// The same policy with a different bound on the chain length.
+//
+// A bound below 1 makes the policy unusable, which `check` reports.
+//
+// ```novo
+// use x509path
+//
+// fn main() [io]
+//     let p = x509path.with_max_chain_length(x509path.strict(), 3)
+//     println("${p.max_chain_length}")   // 3
+// ```
+pub fn with_max_chain_length(p: X509PathPolicy, n: Int) -> X509PathPolicy []
+    todo("x509-nv.x509path.with_max_chain_length")
+
+// The same policy, admitting signatures no verifier could check.
+//
+// What an inventory tool passes with `x509verify.no_verifier`.  The
+// indices land in `X509Path.unchecked`, and a caller that does not
+// read them is claiming more than it was told.
+pub fn allowing_unchecked_signatures(p: X509PathPolicy) -> X509PathPolicy []
+    todo("x509-nv.x509path.allowing_unchecked_signatures")
+
+// The same policy, with these extension OIDs counted as known.
+//
+// A program that implements an extension of its own names it here, and
+// a critical one stops being a reason to refuse.  It is the only way
+// to widen what "recognized" means in RFC 5280 section 4.2, and it is
+// a per-program decision rather than a per-package one.
+pub fn knowing_extensions(p: X509PathPolicy, oids: [AsnOid]) -> X509PathPolicy []
+    todo("x509-nv.x509path.knowing_extensions")
+
+// The same policy, requiring the end-entity certificate to carry this
+// extended key usage.
+//
+// `x509ext.oid_kp_server_auth` for a TLS server, `oid_kp_client_auth`
+// for a client.  A certificate with no `extKeyUsage` at all carries no
+// restriction and passes; one that names purposes and not this one is
+// refused with `X509KeyPurposeNotPermitted`.
+pub fn requiring_key_purpose(p: X509PathPolicy, purpose: AsnOid) -> X509PathPolicy []
+    todo("x509-nv.x509path.requiring_key_purpose")
+
+// The same policy, not checking validity periods.
+//
+// For a tool inspecting an expired chain on purpose.  It does not make
+// an expired certificate valid; it makes the validation stop asking.
+pub fn without_validity_check(p: X509PathPolicy) -> X509PathPolicy []
+    todo("x509-nv.x509path.without_validity_check")
+
+// The same policy, not enforcing name constraints — and counting the
+// `nameConstraints` OID as known so the chain is not then refused for
+// carrying a critical extension nobody processed.
+//
+// The two go together and are therefore one call.  A policy that
+// turned the check off and left the OID unknown would refuse every
+// constrained chain, which is not what anybody reaching for this
+// wants, and a policy that turned it off and silently ignored the
+// extension would accept a certificate restricted in a way it never
+// read.  The name says what it costs.
+pub fn without_name_constraints(p: X509PathPolicy) -> X509PathPolicy []
+    todo("x509-nv.x509path.without_name_constraints")
+
+// Whether the policy could ever accept anything, and why not.
+//
+// `Some(X509PolicyUnusable)` for a maximum chain length below 1.
+// `None` when it is usable.
+//
+// It is here because that is a configuration mistake rather than a
+// certificate problem, and finding it at start-up — where the message
+// can name the field — is worth much more than finding it per request
+// as a stream of rejections that all look like somebody else's fault.
+pub fn check_policy(p: X509PathPolicy) -> ?X509Error []
+    todo("x509-nv.x509path.check_policy")
+
+// ── validation ──────────────────────────────────────────────────────
+
+// **Validate a chain against a trust set, at an instant, under a
+// policy.**
+//
+// The function this package exists for, and a pure one: no clock, no
+// file, no network.  `src` is the buffer every certificate in `chain`
+// was parsed out of; `chain` is ordered with the end-entity
+// certificate first; `at` is the moment the caller read from its own
+// clock; `verifier` is the caller's signature check, possibly
+// `x509verify.no_verifier`.
+//
+// On success the path says which anchor it reached, how long it was,
+// which policies were asserted, and — the field a caller must not skip
+// — which signatures went unchecked.
+//
+// On failure the refusal names the certificate and the reason:
+// `X509CertExpired(index: 1, ...)`, `X509NotACertificateAuthority(index:
+// 2)`, `X509UnknownCriticalExtension(index: 0, oid: "...")`.
+//
+// ```novo
+// use std.bytes
+// use civil
+// use asn1read
+// use x509cert
+// use x509path
+// use x509verify
+//
+// fn main() [io]
+//     let der = bytes.zeros(0)
+//     let at = civil.datetime(civil.date_from_epoch_day(20713), civil.midnight())
+//     match x509cert.parse_all(der, asn1read.default_limits())
+//         Err(e)    => println(e.message())
+//         Ok(chain) =>
+//             match x509path.validate(der, chain, x509path.empty_trust_set(),
+//                                     x509verify.no_verifier(), at,
+//                                     x509path.strict())
+//                 Ok(p)  => println("${p.length}")
+//                 Err(e) => println(e.message())
+// ```
+pub fn validate(src: Bytes, chain: [X509Cert], trust: X509TrustSet, verifier: X509Verifier,
+                at: CivilDateTime, policy: X509PathPolicy) -> Result<X509Path, X509Error> []
+    todo("x509-nv.x509path.validate")
+
+// Parse a chain out of one buffer and validate it, in one call.
+//
+// The convenience over `x509cert.parse_all` and `validate` for the
+// ordinary case: a TLS Certificate message, or a `fullchain` file with
+// the base64 already removed.  Every argument means what it means
+// above.
+pub fn validate_der(src: Bytes, trust: X509TrustSet, verifier: X509Verifier, at: CivilDateTime,
+                    policy: X509PathPolicy, limits: AsnLimits) -> Result<X509Path, X509Error> []
+    todo("x509-nv.x509path.validate_der")
+
+// Put a chain in order: the leaf first, then whichever certificate
+// issued it, up to one an anchor issued.
+//
+// For a caller handed a bag of certificates in no order, which is what
+// a PKCS #7 bundle is and what a badly configured server sends.  The
+// issuer of each is found by comparing name ENCODINGS, and
+// `X509IssuerNotFound` names the certificate whose issuer is missing.
+//
+// It builds ONE chain.  Where two certificates could both be the
+// issuer — a cross-signed CA, which is how a root is retired — the
+// first that matches wins, and a caller that needs both tried needs to
+// try both itself.  Saying so is better than a builder that
+// backtracks in ways nobody can predict from a log line.
+pub fn build_chain(src: Bytes, leaf: X509Cert, pool: [X509Cert],
+                   trust: X509TrustSet) -> Result<[X509Cert], X509Error> []
+    todo("x509-nv.x509path.build_chain")
+
+// Whether each certificate in the chain was issued by the next, by
+// name — or the first refusal if one was not.
+//
+// Names only: no signature, no dates, no extensions.  What a caller
+// checks before spending anything on a chain that is in the wrong
+// order, and what a server checks about the bundle it is configured
+// with.
+pub fn check_chain_order(src: Bytes, chain: [X509Cert]) -> ?X509Error []
+    todo("x509-nv.x509path.check_chain_order")
+
+// The refusal a certificate's own rules produce at this instant under
+// this policy, or `None`.
+//
+// One certificate, one index, no chain: validity, unknown critical
+// extensions, the CA flag and the key usage if the policy requires
+// them.  Published because a caller sometimes has one certificate and
+// a question about it, and because `validate` is built out of it.
+pub fn check_certificate(src: Bytes, c: X509Cert, index: Int, is_issuer: Bool, at: CivilDateTime,
+                         policy: X509PathPolicy, limits: AsnLimits) -> ?X509Error []
+    todo("x509-nv.x509path.check_certificate")
+
+// ── reading the answer ──────────────────────────────────────────────
+
+// The end-entity certificate the path was built for.
+pub fn leaf_of(p: X509Path) -> X509Cert []
+    todo("x509-nv.x509path.leaf_of")
+
+// The anchor the path terminated at.
+pub fn anchor_of(p: X509Path) -> X509Anchor []
+    todo("x509-nv.x509path.anchor_of")
+
+// How many certificates sit below the anchor.
+pub fn path_length(p: X509Path) -> Int []
+    todo("x509-nv.x509path.path_length")
+
+// The index of every certificate whose signature went unchecked.
+//
+// Empty when every one was checked.
+pub fn unchecked_of(p: X509Path) -> [Int] []
+    todo("x509-nv.x509path.unchecked_of")
+
+// Whether every signature on the path was actually checked.
+//
+// The one question a caller must ask before it says "valid" out loud.
+//
+// ```novo
+// use x509path
+//
+// fn main() [io]
+//     println("${x509path.strict().require_all_signatures_checked}")   // true
+// ```
+pub fn is_fully_checked(p: X509Path) -> Bool []
+    todo("x509-nv.x509path.is_fully_checked")
+
+// Every policy OID asserted anywhere on the path.
+pub fn policies_of(p: X509Path) -> [AsnOid] []
+    todo("x509-nv.x509path.policies_of")
+
+// ── names ───────────────────────────────────────────────────────────
+
+// Whether a certificate's names match a host, by RFC 6125 section
+// 6.4.
+//
+// The subject alternative names are matched and the common name is
+// NOT: RFC 6125 deprecated that in 2011 and RFC 9525 removed it in
+// 2024.  A wildcard matches one label, in the leftmost position only,
+// so `*.example.com` matches `a.example.com` and neither
+// `example.com` nor `a.b.example.com`.
+//
+// It is here rather than in a TLS package because the rule is about
+// what a certificate asserts, and because a caller checking a chain
+// and then forgetting to check the name has done the expensive half
+// and skipped the one that matters.
+pub fn matches_hostname(names: [X509GeneralName], host: Str) -> Bool []
+    todo("x509-nv.x509path.matches_hostname")
+
+// Whether a certificate's names fall inside every name constraint on
+// the path above it.
+//
+// The check `enforce_name_constraints` turns on, published on its own
+// so a caller can ask it about a certificate it is considering issuing
+// under a constrained CA.
+pub fn names_permitted(constraints: [X509NameConstraints], names: [X509GeneralName]) -> Bool []
+    todo("x509-nv.x509path.names_permitted")

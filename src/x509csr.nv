@@ -1,0 +1,200 @@
+// x509csr — a PKCS #10 certification request, read.
+//
+// Every body is a `todo()`.  The signatures are the design, and the
+// compiler checks them as claims; see the README for the stamp.
+//
+// WHAT A CERTIFICATION REQUEST IS.  RFC 2986 — PKCS #10 — is how
+// somebody asks a CA for a certificate.  The request carries the name
+// the requester wants, the PUBLIC key it wants certified, and a set of
+// attributes; it is signed with the matching PRIVATE key, and that
+// signature is the whole point.  It is a proof of possession: it says
+// that whoever asked for this certificate holds the private key for
+// the public one inside it, so a CA cannot be tricked into certifying
+// somebody else's key under the requester's name.
+//
+// THE STRUCTURE IS THE SAME THREE PARTS AGAIN.  A
+// `CertificationRequestInfo` holding version, subject, public key and
+// attributes; an algorithm identifier; a signature over the first.  So
+// `info` is a span into the caller's bytes for exactly the reason
+// `X509Cert.tbs` is, and `info_bytes` is the one call that copies.
+//
+// THE CA DECIDES, NOT THE REQUESTER.  Everything in the request is a
+// REQUEST.  The extensions it asks for arrive in an attribute and are
+// what the requester would like; a CA that copied them into the
+// certificate without looking would let anyone ask for a CA
+// certificate and get one.  This package reads them and says so, and
+// the naming says so: `requested_extensions`, never `extensions`.
+//
+// THIS PACKAGE DOES NOT ISSUE ANYTHING.  Turning a request into a
+// certificate means choosing a serial number, a validity period and an
+// extension set, encoding a tbsCertificate and signing it — which is a
+// CA, and a CA is a program with a policy, a key store and an audit
+// log rather than a parser.  The README names it as out of scope.
+
+use std.bytes
+
+// The version of a PKCS #10 request.
+//
+// RFC 2986 defines one, and its encoded value is 0.  Unlike a
+// certificate's, this number is NOT written one higher: a v1 request
+// carries the integer 0, and a reader that added one would refuse
+// every request in the world.
+pub const X509_CSR_VERSION_1 = 0
+
+// `1.2.840.113549.1.9.14` — `extensionRequest`, the PKCS #9 attribute
+// carrying the extensions the requester would like.  Defined in RFC
+// 2985, and the attribute a subject alternative name travels in.
+pub fn oid_extension_request() -> AsnOid []
+    todo("x509-nv.x509csr.oid_extension_request")
+
+// `1.2.840.113549.1.9.7` — `challengePassword`, the PKCS #9 attribute
+// holding a shared secret a CA may use to authorise revocation later.
+//
+// It travels in the clear inside the request, so it is a
+// weak authenticator and RFC 2985 says as much.  It is read because
+// requests carry it, not because it should be relied on.
+pub fn oid_challenge_password() -> AsnOid []
+    todo("x509-nv.x509csr.oid_challenge_password")
+
+// One attribute of a certification request.
+//
+// A plain struct rather than a `@value` one because it appears inside
+// a `Result` and inside an option, and a `@value` struct may be
+// neither (E2015).
+pub struct X509CsrAttribute
+    // Which attribute it is.
+    oid: AsnOid
+    // Its values, each as its own DER, whole.  A SET in the encoding,
+    // usually of exactly one, and the values are handed over unparsed
+    // because their structure is the attribute type's business.
+    values: [Bytes]
+
+// A PKCS #10 certification request, read.
+pub struct X509Csr
+    // 0 for the one version RFC 2986 defines.
+    version: Int
+    // The distinguished name the requester is asking to be certified
+    // under.  A CA may certify a different one; this is what was
+    // asked.
+    subject: AsnName
+    // The public key to be certified.  The signature on this request
+    // is by the matching private key, so verifying it proves the
+    // requester holds it.
+    public_key: AsnSubjectPublicKeyInfo
+    // The attributes, in the order they were written.
+    attributes: [X509CsrAttribute]
+    // The algorithm the request was signed with.
+    signature_algorithm: AsnAlgorithmId
+    // The signature over the CertificationRequestInfo.
+    signature: AsnBitString
+    // The span of the CertificationRequestInfo, exactly as it arrived.
+    // The bytes the signature covers.
+    info: AsnSpan
+
+// The certification request one DER document holds.
+//
+// Trailing bytes are refused.  The spans in the answer point into
+// `src`, which the caller must keep.
+//
+// ```novo
+// use std.bytes
+// use asn1read
+// use x509csr
+//
+// fn main() [io]
+//     let der = bytes.zeros(0)
+//     match x509csr.parse(der, asn1read.default_limits())
+//         Ok(r)  => println("${r.version}")
+//         Err(e) => println(e.message())
+// ```
+pub fn parse(src: Bytes, limits: AsnLimits) -> Result<X509Csr, X509Error> []
+    todo("x509-nv.x509csr.parse")
+
+// The bytes of the CertificationRequestInfo, exactly as they arrived.
+//
+// What the request's signature is computed over, and the one call here
+// that copies a large run of bytes.
+pub fn info_bytes(src: Bytes, r: X509Csr) -> Bytes []
+    todo("x509-nv.x509csr.info_bytes")
+
+// The span of the CertificationRequestInfo, without copying it.
+pub fn info_span(r: X509Csr) -> AsnSpan []
+    todo("x509-nv.x509csr.info_span")
+
+// The raw signature bytes, out of the BIT STRING they travel in.
+pub fn signature_bytes(r: X509Csr) -> Result<Bytes, X509Error> []
+    todo("x509-nv.x509csr.signature_bytes")
+
+// The name the requester asked to be certified under.
+pub fn subject_of(r: X509Csr) -> AsnName []
+    todo("x509-nv.x509csr.subject_of")
+
+// The public key the requester asked to have certified.
+//
+// Hand it to `x509verify.verify_csr` to check that the requester holds
+// the matching private key.
+pub fn public_key_of(r: X509Csr) -> AsnSubjectPublicKeyInfo []
+    todo("x509-nv.x509csr.public_key_of")
+
+// Every attribute, in the order they were written.
+pub fn attributes_of(r: X509Csr) -> [X509CsrAttribute] []
+    todo("x509-nv.x509csr.attributes_of")
+
+// The attribute with this OID, or `None`.
+pub fn attribute_by_oid(r: X509Csr, o: AsnOid) -> ?X509CsrAttribute []
+    todo("x509-nv.x509csr.attribute_by_oid")
+
+// The extensions the requester ASKED FOR, out of the
+// `extensionRequest` attribute.
+//
+// Empty when the attribute is absent.  The name says `requested`
+// because that is what they are: a CA chooses what to issue, and one
+// that copied these into a certificate unexamined would certify
+// whatever anybody asked for — including a CA certificate.
+//
+// They are `AsnExtension` values, the same type a certificate's are, so
+// `x509ext`'s readers work on them unchanged and a CA can ask what was
+// requested in the same words it asks what it issued.
+//
+// ```novo
+// use std.bytes
+// use asn1read
+// use x509csr
+//
+// fn main() [io]
+//     let der = bytes.zeros(0)
+//     match x509csr.parse(der, asn1read.default_limits())
+//         Err(e) => println(e.message())
+//         Ok(r)  =>
+//             match x509csr.requested_extensions(r, asn1read.default_limits())
+//                 Ok(xs) => println("${list.len(xs)}")
+//                 Err(e) => println(e.message())
+// ```
+pub fn requested_extensions(r: X509Csr, limits: AsnLimits) -> Result<[AsnExtension], X509Error> []
+    todo("x509-nv.x509csr.requested_extensions")
+
+// The DNS names the requester asked for, out of the requested
+// `subjectAltName`.
+//
+// The one question a CA's front end asks of nearly every request, and
+// the one an operator reads off a request before approving it.
+pub fn requested_dns_names(r: X509Csr, limits: AsnLimits) -> Result<[Str], X509Error> []
+    todo("x509-nv.x509csr.requested_dns_names")
+
+// The `challengePassword` attribute's value, or `None`.
+//
+// It travels in the clear inside the request.  Read because requests
+// carry it, not because it authenticates anybody.
+pub fn challenge_password(r: X509Csr, limits: AsnLimits) -> Result<?Str, X509Error> []
+    todo("x509-nv.x509csr.challenge_password")
+
+// Whether the request is conforming in the ways a reader can check on
+// its own, or the first refusal if it is not.
+//
+// Version 0, a subject that is present, a public key whose algorithm
+// identifier is well formed, and no attribute repeated.  `None` when
+// it passes.  A CA runs this before it looks at the signature, so that
+// a malformed request is refused for being malformed rather than for
+// failing a check it was never going to reach.
+pub fn check_conformance(src: Bytes, r: X509Csr, limits: AsnLimits) -> ?X509Error []
+    todo("x509-nv.x509csr.check_conformance")

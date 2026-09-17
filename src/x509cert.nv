@@ -1,0 +1,340 @@
+// x509cert — an X.509 certificate, read out of the bytes the caller
+// already holds.
+//
+// Every body is a `todo()`.  The signatures are the design, and the
+// compiler checks them as claims; see the README for the stamp.
+//
+// WHAT A CERTIFICATE IS.  RFC 5280 section 4.1 gives it three fields.
+// The `tbsCertificate` — "to be signed" — holds everything the
+// certificate asserts: a version, a serial number, the algorithm the
+// issuer signed with, the issuer's name, a validity period, the
+// subject's name, the subject's public key and, from version 3, the
+// extensions.  The `signatureAlgorithm` names the algorithm again,
+// outside.  The `signatureValue` is the signature over the
+// tbsCertificate.  That is the whole structure; everything else in the
+// specification is what the fields are allowed to hold.
+//
+// `tbs` IS A SPAN AND THE PACKAGE IS BUILT ON THAT.  The signature is
+// computed over the DER BYTES of the tbsCertificate, exactly as they
+// arrived — not over a re-encoding of the parsed fields.  A parser
+// that handed back fields and let the caller rebuild the bytes would
+// produce a different encoding for every certificate whose writer was
+// not byte-for-byte canonical, and the signature would fail on
+// documents that are perfectly valid.  So `X509Cert.tbs` is an
+// `AsnSpan` into the caller's own buffer, the caller keeps that
+// buffer, and `tbs_bytes` is the one call that copies.  The rule is
+// inherited from asn1-nv, whose readers all answer spans, and it is
+// the reason this package never takes ownership of a document.
+//
+// WHICH IS WHY EVERY FUNCTION THAT NEEDS BYTES TAKES THEM.  An
+// `X509Cert` is not self-contained: it is a description of a buffer.
+// A function that reads a name's encoding, a signature or an extension
+// value takes `src` beside the certificate, and handing it the wrong
+// buffer is a mistake the type system cannot catch — so the parameter
+// is named `src` everywhere and is always first.
+//
+// THE MOMENT ARRIVES AS A PARAMETER.  A `core` package has no clock.
+// `is_valid_at` and `check_validity_at` take the instant the caller
+// read from its own, which is the same shape jwt-nv takes, and it is
+// what lets a test pin an expiry and an audit tool ask whether a
+// certificate was valid when it was PRESENTED rather than only whether
+// it is valid now.
+//
+// EVERY TYPE HERE IS A PLAIN STRUCT.  A `@value` struct may not be a
+// `Result` payload (E2015), and every structure in this module is one.
+// That is a documented v1 limit rather than a defect, and nothing is
+// lost: a certificate is a description of a buffer and is not the kind
+// of thing a device holds in a register file.
+
+use std.bytes
+
+// The version number a certificate with extensions must carry.
+//
+// RFC 5280 section 4.1.2.1: the encoded `[0] version` field holds 2,
+// and everybody writes the number one higher.  A certificate with
+// extensions and a version below 3 is not conforming.
+pub const X509_VERSION_3 = 3
+
+// The version of a certificate with unique identifiers and no
+// extensions.
+pub const X509_VERSION_2 = 2
+
+// The version of a certificate with neither.  The `[0] version` field
+// is ABSENT, not zero, and a writer that emitted the default would
+// produce a second encoding of one value.
+pub const X509_VERSION_1 = 1
+
+// The most serial-number bytes RFC 5280 section 4.1.2.2 admits.
+//
+// Twenty, and a conforming CA must not exceed it.  A reader must
+// nevertheless accept a longer one, because certificates that exceed
+// it were issued and are still in use.
+pub const X509_SERIAL_MAX_BYTES = 20
+
+// An X.509 certificate, read.
+//
+// A plain struct rather than a `@value` one because it is a `Result`
+// payload throughout, and a `@value` struct cannot be one (E2015).
+//
+// Every `Bytes` field here is a COPY of something small — a serial
+// number is twenty bytes — and every large field is a span or a type
+// that carries one.  The certificate does not own the document.
+pub struct X509Cert
+    // 1, 2 or 3.  The encoded field holds 0, 1 or 2 and this is that
+    // plus one, which is how the standard and everybody else writes
+    // it.
+    version: Int
+    // The serial number as the INTEGER's content bytes, leading zero
+    // included.  Bytes and not a number: twenty bytes is the usual
+    // size and none of them fit an `Int`.  The leading zero is what
+    // keeps a positive serial from reading as a negative one, and a
+    // caller that stripped it would print a different number from
+    // every other tool.
+    serial: Bytes
+    // The algorithm named INSIDE the tbsCertificate.
+    signature_algorithm: AsnAlgorithmId
+    // The issuer's distinguished name, with the span it occupies.
+    issuer: AsnName
+    // The subject's distinguished name, with the span it occupies.
+    // Empty is conforming only when `subjectAltName` is present and
+    // critical (RFC 5280 section 4.1.2.6).
+    subject: AsnName
+    // The first moment the certificate is valid, inclusive.
+    not_before: CivilDateTime
+    // The last moment the certificate is valid, inclusive.  A
+    // certificate with no well-defined expiry writes
+    // `99991231235959Z`, which RFC 5280 section 4.1.2.5 gives that
+    // meaning.
+    not_after: CivilDateTime
+    // The subject's public key, algorithm and all.
+    public_key: AsnSubjectPublicKeyInfo
+    // The extensions, in the order they were written.  Order is kept
+    // because the extensions are inside the signed bytes and a caller
+    // re-emitting one must not reorder them.  Empty for a v1 or v2
+    // certificate.
+    extensions: [AsnExtension]
+    // The `[1] issuerUniqueID`, when there is one.  Deprecated by RFC
+    // 5280 section 4.1.2.8 and carried so a reader can say it was
+    // there.
+    issuer_unique_id: ?AsnBitString
+    // The `[2] subjectUniqueID`, when there is one.
+    subject_unique_id: ?AsnBitString
+    // The algorithm named OUTSIDE the tbsCertificate, beside the
+    // signature.  RFC 5280 section 4.1.1.2 requires the two to be
+    // equal, and `algorithms_agree` is the one call that asks.
+    outer_algorithm: AsnAlgorithmId
+    // The signature, as the BIT STRING it travels in.
+    signature: AsnBitString
+    // The span of the tbsCertificate, exactly as it arrived.  THE
+    // BYTES THE SIGNATURE COVERS, and the reason this module answers
+    // spans rather than copies.
+    tbs: AsnSpan
+    // The span of the whole certificate, header included.  What a
+    // caller writes back out, or hashes to get a fingerprint.
+    der: AsnSpan
+
+// The certificate one DER document holds.
+//
+// Trailing bytes are refused: a `.der` file is exactly one
+// certificate, and bytes after it are a second document rather than
+// part of this one.  The spans in the answer point into `src`, which
+// the caller must keep for as long as it holds the certificate.
+//
+// ```novo
+// use std.bytes
+// use asn1read
+// use x509cert
+//
+// fn main() [io]
+//     let der = bytes.zeros(0)
+//     match x509cert.parse(der, asn1read.default_limits())
+//         Ok(c)  => println("${c.version}")
+//         Err(e) => println(e.message())
+// ```
+pub fn parse(src: Bytes, limits: AsnLimits) -> Result<X509Cert, X509Error> []
+    todo("x509-nv.x509cert.parse")
+
+// The certificate at an offset inside a larger document.
+//
+// What reads a certificate out of a PKCS #7 bag, a TLS Certificate
+// message or a chain file: the certificates sit end to end and each
+// one begins where the last ended.
+pub fn parse_at(src: Bytes, off: Int, limits: AsnLimits) -> Result<X509Cert, X509Error> []
+    todo("x509-nv.x509cert.parse_at")
+
+// Every certificate in a buffer holding several end to end, in the
+// order they were written.
+//
+// The shape a chain arrives in over TLS and in a `fullchain.pem` once
+// the base64 has been removed.  The order is the document's and is not
+// checked here; `x509path.check_chain_order` is the call that asks
+// whether each one was issued by the next.
+pub fn parse_all(src: Bytes, limits: AsnLimits) -> Result<[X509Cert], X509Error> []
+    todo("x509-nv.x509cert.parse_all")
+
+// The bytes of the tbsCertificate, exactly as they arrived.
+//
+// **What a signature is computed over**, and the one call in this
+// package that copies a large run of bytes.  A verifier hashes these;
+// nothing re-encodes them.
+//
+// ```novo
+// use std.bytes
+// use asn1read
+// use x509cert
+//
+// fn main() [io]
+//     let der = bytes.zeros(0)
+//     match x509cert.parse(der, asn1read.default_limits())
+//         Err(e) => println(e.message())
+//         Ok(c)  => println("${bytes.len(x509cert.tbs_bytes(der, c))}")
+// ```
+pub fn tbs_bytes(src: Bytes, c: X509Cert) -> Bytes []
+    todo("x509-nv.x509cert.tbs_bytes")
+
+// The span of the tbsCertificate, without copying it.
+//
+// For a caller that hashes in place, or that wants to know how big the
+// signed region is before deciding to.
+pub fn tbs_span(c: X509Cert) -> AsnSpan []
+    todo("x509-nv.x509cert.tbs_span")
+
+// The bytes of the whole certificate, exactly as they arrived.
+//
+// What a fingerprint is computed over, and what a cache stores.
+pub fn der_bytes(src: Bytes, c: X509Cert) -> Bytes []
+    todo("x509-nv.x509cert.der_bytes")
+
+// The raw signature bytes, out of the BIT STRING they travel in.
+//
+// For ECDSA these are a DER `SEQUENCE { r INTEGER, s INTEGER }` and
+// NOT the sixty-four fixed bytes a verifier wants;
+// `asn1pkix.ecdsa_signature_rs` is the split.  For Ed25519 they are
+// the sixty-four bytes directly.  `X509ImpossibleField` when the BIT
+// STRING has unused bits, which a signature never does.
+pub fn signature_bytes(c: X509Cert) -> Result<Bytes, X509Error> []
+    todo("x509-nv.x509cert.signature_bytes")
+
+// The serial number as lower-case hex, with no separators and the
+// leading zero kept.
+//
+// The form every certificate viewer and every CA's own database
+// prints, and the form a revocation list is looked up by.
+pub fn serial_hex(c: X509Cert) -> Str []
+    todo("x509-nv.x509cert.serial_hex")
+
+// Whether the instant falls inside the validity period, inclusive at
+// both ends.
+//
+// The moment is a PARAMETER.  A `core` package has no clock, and the
+// by-product is worth more than the constraint: a test pins an expiry
+// with no fake clock, and an audit tool asks whether a certificate was
+// valid when it was presented rather than only whether it is valid
+// now.
+//
+// ```novo
+// use civil
+// use x509cert
+// use asn1read
+// use std.bytes
+//
+// fn main() [io]
+//     let der = bytes.zeros(0)
+//     let d = civil.date_from_epoch_day(20713)
+//     let at = civil.datetime(d, civil.midnight())
+//     match x509cert.parse(der, asn1read.default_limits())
+//         Err(e) => println(e.message())
+//         Ok(c)  => println("${x509cert.is_valid_at(c, at)}")
+// ```
+pub fn is_valid_at(c: X509Cert, at: CivilDateTime) -> Bool []
+    todo("x509-nv.x509cert.is_valid_at")
+
+// The refusal the validity period produces at this instant, or `None`
+// when it produces none.
+//
+// `X509CertNotYetValid` before `notBefore` and `X509CertExpired` after
+// `notAfter`, each naming `index` so that a chain's report says WHICH
+// certificate.  Two arms rather than one because a certificate whose
+// clock has not come round yet is a deployment that ran early, and one
+// that has expired is a deployment that ran late; they need different
+// people told.
+pub fn check_validity_at(c: X509Cert, at: CivilDateTime, index: Int) -> ?X509Error []
+    todo("x509-nv.x509cert.check_validity_at")
+
+// Whether the certificate's issuer name and subject name have the same
+// encoding.
+//
+// RFC 5280 section 6.1 calls such a certificate **self-issued**.  It
+// is not the same as self-SIGNED: a CA re-keying itself issues a
+// certificate to its own name signed with its old key, and path
+// validation gives self-issued certificates a special place —
+// they do not count against the path length.  Whether it is
+// self-signed is a question for a verifier, and `x509verify` asks it.
+pub fn is_self_issued(src: Bytes, c: X509Cert) -> Bool []
+    todo("x509-nv.x509cert.is_self_issued")
+
+// Whether the algorithm inside the tbsCertificate equals the one
+// beside the signature.
+//
+// RFC 5280 section 4.1.1.2 requires them to be equal, and a
+// certificate where they are not is one to refuse: the outer one is
+// what a verifier would pick and the inner one is what was signed, so
+// a mismatch is a substitution nobody would notice.
+pub fn algorithms_agree(c: X509Cert) -> Bool []
+    todo("x509-nv.x509cert.algorithms_agree")
+
+// The OID of the algorithm the subject's public key belongs to.
+//
+// `1.2.840.10045.2.1` for an elliptic-curve key, `1.3.101.112` for
+// Ed25519, `1.2.840.113549.1.1.1` for RSA — and RSA is a key nothing
+// on this registry can verify a signature with, which
+// `x509verify.algorithm_name` says in words.
+pub fn public_key_algorithm(c: X509Cert) -> AsnOid []
+    todo("x509-nv.x509cert.public_key_algorithm")
+
+// The subject's public key, algorithm and all.
+//
+// Hand it to `asn1pkix.ec_public_key_xy` or
+// `asn1pkix.ed25519_public_key` to get the bytes a verification
+// package takes.
+pub fn public_key_of(c: X509Cert) -> AsnSubjectPublicKeyInfo []
+    todo("x509-nv.x509cert.public_key_of")
+
+// The issuer's distinguished name.
+pub fn issuer_of(c: X509Cert) -> AsnName []
+    todo("x509-nv.x509cert.issuer_of")
+
+// The subject's distinguished name.
+pub fn subject_of(c: X509Cert) -> AsnName []
+    todo("x509-nv.x509cert.subject_of")
+
+// The extensions, in the order they were written.
+//
+// Empty for a v1 or v2 certificate.  `x509ext` is where each one is
+// read.
+pub fn extensions_of(c: X509Cert) -> [AsnExtension] []
+    todo("x509-nv.x509cert.extensions_of")
+
+// Whether the certificate carries the extension with this OID.
+pub fn has_extension(c: X509Cert, o: AsnOid) -> Bool []
+    todo("x509-nv.x509cert.has_extension")
+
+// The certificate's version: 1, 2 or 3.
+pub fn version_of(c: X509Cert) -> Int []
+    todo("x509-nv.x509cert.version_of")
+
+// Whether the certificate is conforming in the ways a reader can check
+// without a chain, or the first refusal if it is not.
+//
+// The checks RFC 5280 states about ONE certificate: a v3 certificate
+// where there are extensions, a non-empty issuer, a subject that is
+// empty only under a critical `subjectAltName`, a serial that is a
+// positive integer, a validity period that does not end before it
+// begins, and the two algorithm identifiers agreeing.  `None` when it
+// passes them all.
+//
+// Separate from `parse`, because a document can be exactly what it
+// claims to be and still be a certificate nobody should have issued,
+// and the two answers go to different people.
+pub fn check_conformance(src: Bytes, c: X509Cert, limits: AsnLimits) -> ?X509Error []
+    todo("x509-nv.x509cert.check_conformance")

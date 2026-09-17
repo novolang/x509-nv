@@ -1,0 +1,249 @@
+// x509err — every way a certificate, a revocation list or a
+// certification request can be refused.
+//
+// Every body is a `todo()`.  The signatures are the design, and the
+// compiler checks them as claims; see the README for the stamp.
+//
+// TWO KINDS OF REFUSAL, AND TELLING THEM APART IS THE WHOLE POINT.
+//
+// A document that DOES NOT PARSE is one problem: the bytes are not the
+// structure RFC 5280 describes, and nothing about trust has been
+// decided yet.  A document that parses PERFECTLY WELL and then fails a
+// rule is a different problem: the bytes are a valid certificate and
+// the answer is that it expired on Tuesday, or that it is not allowed
+// to sign other certificates.
+//
+// An operator reading a log needs those apart.  The first is a broken
+// file, a truncated download, a DER writer with a bug; the second is a
+// certificate that needs renewing, a trust store that needs an anchor,
+// a chain assembled in the wrong order.  `is_malformed` and
+// `is_rule_failure` are the two predicates, they partition the enum,
+// and every variant answers exactly one of them.
+//
+// EVERY REFUSAL SAYS WHERE.  A malformed document carries the byte
+// offset it was found at, counted from the first byte the caller
+// supplied, so two tools reading one file name one byte.  A rule
+// failure carries the INDEX of the certificate in the chain it is
+// about — 0 for the end-entity certificate, counting up towards the
+// trust anchor — because "the chain is invalid" is not an answer
+// anybody can act on and "certificate 2 of 4 expired" is.
+//
+// THE DECODE CAUSE IS CARRIED WHOLE.  `X509NotDer` holds asn1-nv's own
+// `AsnDecodeError` rather than flattening it to a string, so a caller
+// that wants to know it was an indefinite length rather than a
+// truncation can match on it, and a caller that only wants a line
+// calls `message`.
+
+// X509Error is why a PKIX document was refused.
+//
+// The first five arms are documents that are not the structure.  The
+// rest are documents that are, and that failed a rule RFC 5280 states.
+pub enum X509Error
+    // ── the document is not the structure ──────────────────────────
+    //
+    // The bytes are not DER, or not the DER this structure is written
+    // in.  The cause is asn1-nv's own refusal, carried whole, so the
+    // offset and the rule survive.
+    X509NotDer(cause: AsnDecodeError)
+    // A field RFC 5280 requires was absent, or held a type the module
+    // does not admit.  `field` is the name from the standard's own
+    // ASN.1 module — `"tbsCertificate"`, `"thisUpdate"`,
+    // `"subjectPublicKeyInfo"` — so a reader can find it.
+    X509MissingField(at: Int, field: Str)
+    // A version number this package does not read: an X.509
+    // certificate above v3, a CRL above v2, a PKCS #10 request above
+    // v1.  RFC 5280 section 4.1.2.1.
+    X509BadVersion(at: Int, version: Int)
+    // An extension whose OID this package reads, whose value is not
+    // the structure that OID names.  `oid` is dotted text so the arm
+    // carries no dependency type and a log line needs no lookup.
+    X509BadExtensionValue(at: Int, oid: Str)
+    // A field that parses and is nevertheless impossible: a validity
+    // period that ends before it begins, a serial number of zero
+    // length, a BIT STRING with unused bits where the structure
+    // forbids them.
+    X509ImpossibleField(at: Int, field: Str, why: Str)
+
+    // ── the document is valid and failed a rule ────────────────────
+    //
+    // The instant the caller supplied is after `not_after`.  The time
+    // is rendered rather than carried as a civil date so that the arm
+    // can be matched by a caller that never took a dependency on a
+    // calendar.
+    X509CertExpired(index: Int, not_after: Str)
+    // The instant the caller supplied is before `not_before`.
+    X509CertNotYetValid(index: Int, not_before: Str)
+    // A critical extension whose OID neither this package nor the
+    // caller's policy names.  RFC 5280 section 4.2 requires a
+    // conforming implementation to refuse the certificate, and this is
+    // that refusal.
+    X509UnknownCriticalExtension(index: Int, oid: Str)
+    // No certificate in the chain, and no anchor in the trust set, has
+    // a subject whose encoding equals this certificate's issuer.
+    X509IssuerNotFound(index: Int, issuer: Str)
+    // A certificate that signed another does not carry
+    // `basicConstraints` with the CA flag set.  RFC 5280 section
+    // 4.2.1.9.
+    X509NotACertificateAuthority(index: Int)
+    // A certificate that signed another carries `keyUsage` without the
+    // `keyCertSign` bit.  RFC 5280 section 4.2.1.3, bit 5.
+    X509KeyCertSignNotPermitted(index: Int)
+    // More certificates sit below a CA than its
+    // `basicConstraints.pathLenConstraint` allows.  RFC 5280 section
+    // 4.2.1.9.
+    X509PathLenExceeded(index: Int, limit: Int)
+    // The chain is longer than the policy's own bound.  Not a rule of
+    // RFC 5280 — a bound the caller set, so that a chain nobody meant
+    // to build cannot be walked forever.
+    X509ChainTooLong(length: Int, limit: Int)
+    // A name in the certificate falls outside the permitted subtrees,
+    // or inside an excluded one, of a name-constraints extension above
+    // it.  RFC 5280 section 4.2.1.10.
+    X509NameConstraintViolated(index: Int, name: Str)
+    // The algorithm named inside the TBSCertificate is not the one
+    // named beside the signature.  RFC 5280 section 4.1.1.2 requires
+    // them to be equal; the outer one is what a verifier would pick
+    // and the inner one is what was signed.
+    X509AlgorithmMismatch(index: Int)
+    // A verifier checked the signature and it did not verify.
+    X509SignatureInvalid(index: Int)
+    // No verifier the caller supplied can check a signature under this
+    // algorithm.  NOT a failure by itself: under a policy that admits
+    // it, the path validates and the index is reported in
+    // `X509Path.unchecked`.  It becomes this refusal only when the
+    // policy requires every signature to have been checked.
+    X509NoVerifierForAlgorithm(index: Int, algorithm: Str)
+    // A revocation list names this serial number.  `reason` is the
+    // CRLReason the entry carried, or `"unspecified"`.
+    X509CertRevoked(serial: Str, reason: Str)
+    // A revocation list whose `nextUpdate` is before the instant the
+    // caller supplied, or whose `thisUpdate` is after it.
+    X509CrlNotCurrent(this_update: Str, next_update: Str)
+    // The certificate does not carry the extended key usage the policy
+    // requires.  RFC 5280 section 4.2.1.12.
+    X509KeyPurposeNotPermitted(index: Int, purpose: Str)
+    // `validate` was handed no certificates at all.
+    X509EmptyChain
+    // The trust set holds no anchor, so no path can terminate.  A
+    // configuration mistake rather than a certificate problem, and
+    // worth its own arm for exactly that reason.
+    X509EmptyTrustSet
+    // A policy that could never accept anything: a maximum chain
+    // length below one, a required key purpose that is not an OID.
+    // Found before a request arrives rather than per request.
+    X509PolicyUnusable(why: Str)
+
+// message renders the refusal as one line of prose, with the offset or
+// the certificate index in it.
+//
+// `Result<_, X509Error>` requires this impl: SPEC section 3.4 admits a
+// `Result` error type only if it implements `Error`.
+impl Error for X509Error
+    // Answer the one-line report: what was refused, and where.
+    //
+    // ```novo
+    // use x509err
+    //
+    // fn main() [io]
+    //     let e = X509CertExpired(index: 0, not_after: "2026-01-01T00:00:00Z")
+    //     println(e.message())
+    //     // x509: certificate 0 expired at 2026-01-01T00:00:00Z
+    // ```
+    fn message(self) -> Str
+        todo("x509-nv.x509err.X509Error.message")
+
+// Whether the refusal says the bytes are not the structure.
+//
+// True for `X509NotDer`, `X509MissingField`, `X509BadVersion`,
+// `X509BadExtensionValue` and `X509ImpossibleField`, and false for
+// every other arm.  A program that retries a download, reports a
+// corrupt file or blames a DER writer branches on this one.
+//
+// ```novo
+// use x509err
+//
+// fn main() [io]
+//     let e = X509MissingField(at: 4, field: "tbsCertificate")
+//     println("${x509err.is_malformed(e)}")   // true
+// ```
+pub fn is_malformed(e: X509Error) -> Bool []
+    todo("x509-nv.x509err.is_malformed")
+
+// Whether the refusal says a valid document failed a rule.
+//
+// The exact complement of `is_malformed`: the two partition the enum,
+// so a caller may branch on either and never meet a third case.  A
+// program that renews a certificate, adds an anchor or reorders a
+// chain branches on this one.
+//
+// ```novo
+// use x509err
+//
+// fn main() [io]
+//     let e = X509NotACertificateAuthority(index: 1)
+//     println("${x509err.is_rule_failure(e)}")   // true
+// ```
+pub fn is_rule_failure(e: X509Error) -> Bool []
+    todo("x509-nv.x509err.is_rule_failure")
+
+// Whether the refusal is about the time the caller supplied.
+//
+// True for `X509CertExpired`, `X509CertNotYetValid` and
+// `X509CrlNotCurrent`.  Named because it is the one class of failure
+// that goes away on its own — or arrives on its own — and a monitor
+// that warns before a certificate expires asks exactly this.
+pub fn is_validity_failure(e: X509Error) -> Bool []
+    todo("x509-nv.x509err.is_validity_failure")
+
+// Which certificate in the chain the refusal is about, counting the
+// end-entity certificate as 0 — or -1 when it is about none.
+//
+// -1 for every malformed-document arm, for `X509CertRevoked`, for
+// `X509CrlNotCurrent`, for `X509EmptyChain`, for `X509EmptyTrustSet`
+// and for `X509PolicyUnusable`.
+//
+// ```novo
+// use x509err
+//
+// fn main() [io]
+//     let e = X509SignatureInvalid(index: 2)
+//     println("${x509err.error_index(e)}")   // 2
+// ```
+pub fn error_index(e: X509Error) -> Int []
+    todo("x509-nv.x509err.error_index")
+
+// The byte the refusal was found at, or -1 when the refusal is not
+// about a position in a document.
+//
+// For `X509NotDer` this is the offset asn1-nv counted; for the other
+// malformed arms it is the field's own offset.  Every rule-failure arm
+// answers -1, because a certificate that expired did not do so at a
+// byte.
+pub fn error_offset(e: X509Error) -> Int []
+    todo("x509-nv.x509err.error_offset")
+
+// The asn1-nv refusal underneath, when there is one.
+//
+// `Some` for `X509NotDer` alone.  A caller that wants to know a
+// document was BER rather than DER — an indefinite length, an unsorted
+// SET OF — asks `asn1err.is_der_only` of what this answers, rather
+// than reading a rendered string back.
+pub fn decode_cause(e: X509Error) -> ?AsnDecodeError []
+    todo("x509-nv.x509err.decode_cause")
+
+// The refusal as a short stable token, for a log that is grepped
+// rather than read: `"not-der"`, `"cert-expired"`,
+// `"unknown-critical-extension"`, `"no-verifier"`.
+//
+// One token per arm, and the tokens never change once published: a
+// dashboard counting refusals by kind is counting these.
+//
+// ```novo
+// use x509err
+//
+// fn main() [io]
+//     let e = X509UnknownCriticalExtension(index: 0, oid: "1.3.6.1.4.1.9999.1")
+//     println(x509err.code(e))   // unknown-critical-extension
+// ```
+pub fn code(e: X509Error) -> Str []
+    todo("x509-nv.x509err.code")

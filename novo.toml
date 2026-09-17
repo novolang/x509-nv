@@ -1,0 +1,112 @@
+[package]
+name        = "x509-nv"
+version     = "0.0.1"
+description = "RFC 5280 over asn1-nv: certificates, revocation lists and PKCS #10 requests parsed into typed values whose bytes are SPANS into the caller's own buffer, the thirteen extensions RFC 5280 defines including the unknown-critical rule, and path validation as a PURE FUNCTION of a chain, a trust set, an instant and a caller-supplied signature verifier — so no algorithm set is pinned here and no RSA exists to pin.  Interface only — every body is a todo()."
+license     = "Apache-2.0"
+
+# An INTERFACE release: every `pub fn` body is a `todo()`, so the
+# signatures and the effect rows are published and nothing is
+# implemented.  `novo pkg publish` recognises the shape and requires
+# both the draft stability and the 0.0.x version; the first
+# implementation is the 0.1.0 published over it.
+stability   = "draft"
+
+# `core`.  Reading a certificate is arithmetic over bytes the host
+# already holds, and the three things a validator would otherwise reach
+# for all arrive as PARAMETERS instead:
+#
+#   the clock      — `is_valid_at` and `validate` take the instant, so
+#                    a test pins an expiry with no fake clock and an
+#                    audit tool asks about the moment a certificate was
+#                    PRESENTED
+#   the trust set  — a value the caller built, because reading a trust
+#                    store is `[io]` and because whose certificates a
+#                    program believes belongs in its own source
+#   the verifier   — a value holding two functions, both with the `[]`
+#                    row, because this package does no signature
+#                    arithmetic at all
+#
+# Every public function's effect row is `[]`.  One of them would widen
+# if it could: `X509Verifier.verify` is `[]`, so a verifier backed by a
+# hardware security module — which is `[io]` — cannot be passed here.
+# That is the right answer for this layer and the wrong one for that
+# caller, and the widening belongs to a `host` package wrapping this
+# one rather than to this signature.
+#
+# It carries NO `tests/embedded_probe.nv` and makes no device claim.
+# The shape is wrong rather than the size: a certificate is a tree of
+# variable-length values whose count is decided by whoever wrote the
+# file, and the embedded runtime has neither `Bytes` nor `Str` nor
+# `Result`.  A device checking a provisioned key walks DER headers and
+# compares an OID, which is `asn1-nv`'s `asn1tag`, and that module does
+# carry a probe.
+layer       = "core"
+
+category    = "crypto"
+
+tags = ["x509", "rfc-5280", "certificate", "crl", "csr", "pkcs10", "pkix", "path-validation", "der", "sans-io"]
+repository  = "https://github.com/novolang/x509-nv"
+maintainers = ["novo-lang"]
+novo        = ">= 0.9.0"
+
+# A library: no `main`, so `novo pkg build` type-checks and
+# effect-checks every module under `src/` and writes no binary.
+
+[docs.pages]
+"README.md" = "A certificate, its extensions, and a chain checked at a moment you choose"
+
+[dependencies]
+# asn1-nv reads the DER a certificate is written in, and this package
+# takes and answers ITS types rather than declaring a second spelling
+# of them: `AsnSpan`, `AsnLimits`, `AsnOid`, `AsnName`, `AsnAttribute`,
+# `AsnAlgorithmId`, `AsnSubjectPublicKeyInfo`, `AsnBitString`,
+# `AsnExtension` and `AsnDecodeError`.
+#
+# The rule that comes with it is the one this package is built on:
+# every reader answers a SPAN into the caller's bytes and not a copy,
+# because a certificate's signature is computed over the bytes of its
+# TBSCertificate exactly as they arrived.  A parser that handed back
+# parsed fields and made the caller re-encode them would produce
+# different bytes for every certificate whose writer was not
+# byte-for-byte canonical, and the signature would fail on documents
+# that are perfectly valid.  `core`, so the layer rule holds.
+#
+# Under the caret rule `^0.0.1` means exactly 0.0.1: a `0.0.x` version
+# has no compatible neighbours.
+asn1-nv = "^0.0.1"
+
+# calendar-nv supplies `CivilDateTime`, which is what asn1-nv's
+# `utc_time_at` and `generalized_time_at` answer and therefore what a
+# validity period, a `thisUpdate` and a revocation date are made of.
+# It is named directly rather than re-exported through asn1-nv because
+# these signatures NAME the type — `is_valid_at(c, at: CivilDateTime)`
+# — and a dependency a signature names is a dependency the manifest
+# should state.  `civil.compare_datetime` is also the comparison that
+# decides whether an instant falls inside a validity period.  `core`,
+# so the layer rule holds.
+calendar-nv = "^0.0.2"
+
+# NOT p256-nv, NOT ed25519-nv, NOT crypto-nv, and that is the design
+# rather than an omission.
+#
+# The signature check arrives as an `X509Verifier`: a value holding two
+# functions the CALLER wrote.  A package that depended on a
+# verification package would pin an algorithm set — it would be
+# republished every time one was added, and it would drag that
+# algorithm's implementation into the footprint of every caller,
+# including the ones that needed a different one or none at all.  A
+# program holding p256-nv verifies ECDSA; one holding ed25519-nv
+# verifies Ed25519; one holding neither validates a path and is TOLD
+# which signatures went unchecked, which is a first-class answer here
+# and not a failure.
+#
+# NOT an RSA package either, because there is none: nothing on this
+# registry implements RSA.  A certificate signed
+# `sha256WithRSAEncryption` — most of the public web — parses here and
+# is verified by nothing.  The algorithm identifiers are published and
+# `x509verify.is_rsa_algorithm` names the family, so a caller is told
+# what it is holding rather than meeting a generic refusal.
+#
+# NOT base64-nv.  This package takes DER, as asn1-nv does.  Stripping
+# the armour from a `-----BEGIN CERTIFICATE-----` block is a handful of
+# lines in the caller, and the base64 itself is base64-nv's.

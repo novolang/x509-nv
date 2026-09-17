@@ -1,0 +1,251 @@
+// tests/x509_cert_tests.nv — a certificate, its bytes and its dates.
+//
+// RED ON PURPOSE, like every suite here: each assertion reaches
+// `not implemented: x509-nv.<module>.<fn>`.
+//
+// The two facts this suite exists to pin are the two the rest of the
+// package depends on.  The bytes a signature covers come back exactly
+// as they arrived, because that is what a signature is over.  And the
+// validity period is checked against a moment the caller supplies,
+// because a `core` package has no clock and because an audit tool asks
+// about the past.
+//
+// Where a byte vector appears it is one taken from RFC 5280's own
+// ASN.1 module or from the encoding rules of ITU-T X.690, and the
+// comment says which.  Where no vector is certain, the assertion is
+// about the STRUCTURE and the RULE, and the comment names the section
+// it comes from.
+
+use std.test
+use std.bytes
+use asn1read
+use asn1oid
+use x509cert
+use x509name
+use x509err
+
+// A document that is not a certificate.  Every parse of it refuses,
+// and the suite uses it wherever the refusal is what is being
+// asserted.
+fn not_a_certificate() -> Bytes
+    bytes.from_hex("3003020107") ?? bytes.zeros(0)
+
+// The limits every read in this suite is bounded by: depth 64, a
+// 16 MiB value, DER strictly.
+fn limits() -> AsnLimits
+    asn1read.default_limits()
+
+@test
+fn test_a_certificate_that_is_not_one_refuses_and_says_so() [io]
+    test.case("a SEQUENCE holding an INTEGER is not a certificate")
+    match x509cert.parse(not_a_certificate(), limits())
+        Ok(_)  => test.fail("30 03 02 01 07 is a SEQUENCE of one INTEGER")
+        Err(e) =>
+            test.case("and the refusal says the bytes are not the structure")
+            test.assert(x509err.is_malformed(e))
+            test.assert(not x509err.is_rule_failure(e))
+
+    test.case("a refusal about the document names no certificate index")
+    match x509cert.parse(bytes.zeros(0), limits())
+        Ok(_)  => test.fail("no bytes is not a certificate")
+        Err(e) => test.assert_eq(x509err.error_index(e), -1)
+
+@test
+fn test_the_tbs_bytes_come_back_exactly_as_they_arrived() [io]
+    // THE rule of this package.  RFC 5280 section 4.1.1.2: the
+    // signature is over the DER encoding of the tbsCertificate, and a
+    // parser that re-encoded parsed fields would produce different
+    // bytes for every certificate whose writer was not byte-for-byte
+    // canonical.
+    let der = not_a_certificate()
+
+    test.case("tbs_span names a region inside the document")
+    match x509cert.parse(der, limits())
+        Err(e) => test.assert(x509err.is_malformed(e))
+        Ok(c)  =>
+            let span = x509cert.tbs_span(c)
+            test.assert(span.off >= 0)
+            test.assert(span.len > 0)
+            test.assert(span.off + span.len <= bytes.len(der))
+
+            test.case("and tbs_bytes is exactly that region of the caller's bytes")
+            let tbs = x509cert.tbs_bytes(der, c)
+            test.assert_eq(bytes.len(tbs), span.len)
+            test.assert_eq_str(bytes.to_hex(tbs),
+                bytes.to_hex(bytes.slice(der, span.off, span.off + span.len)))
+
+            test.case("der_bytes is the whole certificate, header included")
+            let whole = x509cert.der_bytes(der, c)
+            test.assert(bytes.len(whole) >= bytes.len(tbs))
+
+@test
+fn test_validity_is_checked_against_a_supplied_instant_and_never_a_clock() [io]
+    // `is_valid_at` takes the moment.  The by-product is what the
+    // design is for: the same certificate answers differently at two
+    // instants, and neither answer came from a clock this package
+    // read.
+    let der = not_a_certificate()
+    let early = civil.datetime(civil.date_from_epoch_day(0), civil.midnight())
+    let late = civil.datetime(civil.date_from_epoch_day(30000), civil.midnight())
+
+    test.case("the 1st of January 1970 and a day in 2052 are different instants")
+    test.assert(civil.compare_datetime(early, late) < 0)
+
+    match x509cert.parse(der, limits())
+        Err(e) => test.assert(x509err.is_malformed(e))
+        Ok(c)  =>
+            test.case("a certificate is not valid at both ends of that span")
+            let a = x509cert.is_valid_at(c, early)
+            let b = x509cert.is_valid_at(c, late)
+            test.assert(not (a and b))
+
+            test.case("check_validity_at names which way it failed, and which certificate")
+            match x509cert.check_validity_at(c, early, 2)
+                None    => test.assert(x509cert.is_valid_at(c, early))
+                Some(e) =>
+                    test.assert(x509err.is_validity_failure(e))
+                    test.assert(x509err.is_rule_failure(e))
+                    test.assert_eq(x509err.error_index(e), 2)
+                    test.assert_eq(x509err.error_offset(e), -1)
+
+@test
+fn test_the_version_numbers_are_the_ones_everybody_writes() [io]
+    // RFC 5280 section 4.1.2.1.  The encoded field holds 0, 1 or 2 and
+    // every tool prints one more than that; the constants are the
+    // printed numbers, so a reader comparing against a certificate
+    // dump is comparing the same thing.
+    test.case("a certificate with extensions is version 3")
+    test.assert_eq(x509cert.X509_VERSION_3, 3)
+    test.assert_eq(x509cert.X509_VERSION_2, 2)
+    test.assert_eq(x509cert.X509_VERSION_1, 1)
+
+    test.case("a conforming serial number is at most twenty bytes")
+    test.assert_eq(x509cert.X509_SERIAL_MAX_BYTES, 20)
+
+    match x509cert.parse(not_a_certificate(), limits())
+        Err(e) => test.assert(x509err.is_malformed(e))
+        Ok(c)  =>
+            test.case("version_of is between 1 and 3")
+            let v = x509cert.version_of(c)
+            test.assert(v >= 1)
+            test.assert(v <= 3)
+
+@test
+fn test_a_serial_number_keeps_its_leading_zero() [io]
+    // RFC 5280 section 4.1.2.2 makes the serial a positive INTEGER, and
+    // DER writes a positive integer whose top bit is set with a leading
+    // zero byte.  Stripping it would print a different number from
+    // every other tool, and would look the serial up in a revocation
+    // list under a key nobody else uses.
+    match x509cert.parse(not_a_certificate(), limits())
+        Err(e) => test.assert(x509err.is_malformed(e))
+        Ok(c)  =>
+            test.case("serial_hex is the content bytes, lower case, no separators")
+            let hex = x509cert.serial_hex(c)
+            test.assert_eq_str(hex, bytes.to_hex(c.serial))
+            test.assert_eq(str.len(hex), 2 * bytes.len(c.serial))
+
+@test
+fn test_the_two_algorithm_identifiers_must_agree() [io]
+    // RFC 5280 section 4.1.1.2.  The outer one is what a verifier would
+    // pick and the inner one is inside the signed bytes, so a
+    // certificate where they differ is a substitution nobody would
+    // notice.
+    match x509cert.parse(not_a_certificate(), limits())
+        Err(e) => test.assert(x509err.is_malformed(e))
+        Ok(c)  =>
+            test.case("algorithms_agree asks the one question")
+            test.assert(x509cert.algorithms_agree(c))
+
+            test.case("and public_key_algorithm names the key, not the signature")
+            let ka = x509cert.public_key_algorithm(c)
+            test.assert(asn1oid.arc_count(ka) >= 2)
+
+@test
+fn test_self_issued_is_a_name_question_and_not_a_key_question() [io]
+    // RFC 5280 section 6.1 calls a certificate self-ISSUED when its
+    // issuer and subject names are the same.  A CA re-keying itself
+    // issues one that is self-issued and NOT self-signed, and path
+    // validation treats the two differently — so the name question has
+    // to be answerable with no verifier at all.
+    let der = not_a_certificate()
+    match x509cert.parse(der, limits())
+        Err(e) => test.assert(x509err.is_malformed(e))
+        Ok(c)  =>
+            test.case("is_self_issued needs no key and no verifier")
+            let same = x509name.issuer_matches_subject(der, x509cert.issuer_of(c),
+                                                       der, x509cert.subject_of(c))
+            test.assert_eq(x509cert.is_self_issued(der, c), same)
+
+@test
+fn test_names_are_compared_by_encoding_and_printed_for_a_person() [io]
+    // The chain-building rule.  Two names that print the same can have
+    // different encodings, and a comparison over the printed form would
+    // accept a certificate issued by somebody else's CA.
+    let der = not_a_certificate()
+    match x509cert.parse(der, limits())
+        Err(e) => test.assert(x509err.is_malformed(e))
+        Ok(c)  =>
+            let subject = x509cert.subject_of(c)
+
+            test.case("a name knows the span it occupies in the caller's bytes")
+            let span = x509name.name_span(subject)
+            test.assert(span.off >= 0)
+            test.assert_eq(bytes.len(x509name.name_der(der, subject)), span.len)
+
+            test.case("a name is equal to itself by encoding")
+            test.assert(x509name.issuer_matches_subject(der, subject, der, subject))
+
+            test.case("rdn_count and is_empty agree")
+            test.assert_eq(x509name.is_empty(subject), x509name.rdn_count(subject) == 0)
+
+@test
+fn test_rfc_4514_reverses_the_order_and_escapes_the_seven_characters() [io]
+    // RFC 4514 section 2.1 writes the most specific attribute first,
+    // which is the reverse of the encoding's order.  Section 2.4 lists
+    // the characters an attribute value escapes with a backslash.
+    test.case("a comma inside a value is escaped")
+    test.assert_eq_str(x509name.escape_rfc4514("Acme, Ltd"), "Acme\\, Ltd")
+
+    test.case("and a plus, a quote, a backslash and the angle brackets")
+    test.assert_eq_str(x509name.escape_rfc4514("a+b"), "a\\+b")
+    test.assert_eq_str(x509name.escape_rfc4514("a<b>c"), "a\\<b\\>c")
+    test.assert_eq_str(x509name.escape_rfc4514("a;b"), "a\\;b")
+
+    test.case("a value with none of them is unchanged")
+    test.assert_eq_str(x509name.escape_rfc4514("example.com"), "example.com")
+
+@test
+fn test_the_attribute_types_rfc_5280_requires_are_named() [io]
+    // RFC 5280 section 4.1.2.4 lists the attribute types a conforming
+    // implementation must be prepared to receive.  Four of them are
+    // published by asn1-nv and are not repeated; these are the rest.
+    test.case("locality is 2.5.4.7 and state or province is 2.5.4.8")
+    test.assert_eq_str(asn1oid.oid_text(x509name.oid_locality_name()), "2.5.4.7")
+    test.assert_eq_str(asn1oid.oid_text(x509name.oid_state_or_province_name()),
+                       "2.5.4.8")
+
+    test.case("the entity's serial number is 2.5.4.5, which is not the certificate's")
+    test.assert_eq_str(asn1oid.oid_text(x509name.oid_serial_number()), "2.5.4.5")
+
+    test.case("the distinguished name qualifier is 2.5.4.46")
+    test.assert_eq_str(asn1oid.oid_text(x509name.oid_dn_qualifier()), "2.5.4.46")
+
+    test.case("domainComponent is under the joint-ISO-ITU-T arc, from RFC 4519")
+    test.assert_eq_str(asn1oid.oid_text(x509name.oid_domain_component()),
+                       "0.9.2342.19200300.100.1.25")
+
+    test.case("and the deprecated PKCS 9 email attribute is 1.2.840.113549.1.9.1")
+    test.assert_eq_str(asn1oid.oid_text(x509name.oid_email_address()),
+                       "1.2.840.113549.1.9.1")
+
+    test.case("RFC 4514 section 3 gives the short names")
+    test.assert_eq_str(x509name.attribute_short_name(asn1oid.oid_common_name()), "CN")
+    test.assert_eq_str(x509name.attribute_short_name(x509name.oid_locality_name()), "L")
+    test.assert_eq_str(
+        x509name.attribute_short_name(x509name.oid_state_or_province_name()), "ST")
+    test.assert_eq_str(x509name.attribute_short_name(x509name.oid_domain_component()),
+                       "DC")
+
+    test.case("and an OID with no short name answers the empty string")
+    test.assert_eq_str(x509name.attribute_short_name(asn1oid.oid_sha256()), "")

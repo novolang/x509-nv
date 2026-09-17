@@ -1,0 +1,355 @@
+// x509crl — a certificate revocation list, and the lookup a caller
+// does against it.
+//
+// Every body is a `todo()`.  The signatures are the design, and the
+// compiler checks them as claims; see the README for the stamp.
+//
+// WHAT A REVOCATION LIST IS.  RFC 5280 section 5 gives a CA a way to
+// say that a certificate it issued is no longer valid, before the
+// certificate's own expiry.  A CRL is a signed list: the issuer's
+// name, the moment it was produced, the moment the next one is due,
+// and one entry per revoked certificate, holding that certificate's
+// SERIAL NUMBER and the date it was revoked.  Its structure is the
+// same three parts a certificate has — a `tbsCertList`, an algorithm
+// identifier, a signature over the first — so everything this package
+// says about spans applies unchanged.
+//
+// A SERIAL NUMBER IS THE KEY, AND IT IS ONLY UNIQUE UNDER ONE ISSUER.
+// A CRL revokes certificates its own issuer signed.  Looking a serial
+// up in the wrong issuer's list finds nothing and answers "not
+// revoked", which is the wrong answer given confidently — so
+// `is_revoked_by` takes the certificate and checks the issuer names
+// as well, and `is_revoked` is the bare lookup for a caller that has
+// already matched them.
+//
+// THIS PACKAGE FETCHES NOTHING.  A CRL arrives as bytes the caller
+// read from a file or a socket.  The address is in the certificate's
+// `cRLDistributionPoints` extension and `x509ext` reads it; going and
+// getting it is `[net]` work, which this layer's budget does not
+// admit, and which belongs in a `host` package built on this one.
+//
+// THE MOMENT ARRIVES AS A PARAMETER, for the same reason it does
+// everywhere else here: a `core` package has no clock, and a test that
+// pins a `nextUpdate` needs to choose the moment anyway.
+//
+// DELTA CRLS ARE READ AND NOT APPLIED.  `delta_crl_indicator` says a
+// list is a delta and names the base it is relative to; combining a
+// delta with its base is a state machine over two documents, and this
+// package hands a caller both rather than guessing which base it
+// holds.
+
+use std.bytes
+
+// The version number of a CRL with extensions.
+//
+// RFC 5280 section 5.1.2.1: the encoded `version` field holds 1, and
+// everybody writes the number one higher.  A CRL with extensions must
+// be v2.
+pub const X509_CRL_VERSION_2 = 2
+
+// The version of a CRL with no extensions.  The `version` field is
+// ABSENT rather than zero.
+pub const X509_CRL_VERSION_1 = 1
+
+// `2.5.29.20` — `id-ce-cRLNumber`.  A monotonically increasing number
+// the issuer gives each list, so a caller can tell an old one from a
+// new one.  RFC 5280 section 5.2.3.
+pub fn oid_crl_number() -> AsnOid []
+    todo("x509-nv.x509crl.oid_crl_number")
+
+// `2.5.29.21` — `id-ce-cRLReasons`.  The entry extension holding why a
+// certificate was revoked.  RFC 5280 section 5.3.1.
+pub fn oid_crl_reason() -> AsnOid []
+    todo("x509-nv.x509crl.oid_crl_reason")
+
+// `2.5.29.24` — `id-ce-invalidityDate`.  The entry extension saying
+// when the key is BELIEVED to have been compromised, which may be
+// earlier than the revocation date.  RFC 5280 section 5.3.2.
+pub fn oid_invalidity_date() -> AsnOid []
+    todo("x509-nv.x509crl.oid_invalidity_date")
+
+// `2.5.29.29` — `id-ce-certificateIssuer`.  The entry extension that
+// names a different issuer for the entries after it, in an INDIRECT
+// CRL.  RFC 5280 section 5.3.3.
+pub fn oid_certificate_issuer() -> AsnOid []
+    todo("x509-nv.x509crl.oid_certificate_issuer")
+
+// `2.5.29.27` — `id-ce-deltaCRLIndicator`.  RFC 5280 section 5.2.4.
+// Its presence makes the list a delta, and its value is the CRL number
+// of the base it applies to.
+pub fn oid_delta_crl_indicator() -> AsnOid []
+    todo("x509-nv.x509crl.oid_delta_crl_indicator")
+
+// `2.5.29.28` — `id-ce-issuingDistributionPoint`.  RFC 5280 section
+// 5.2.5.  Says which certificates the list covers, and is critical, so
+// a reader that ignored it could treat a partial list as a complete
+// one.
+pub fn oid_issuing_distribution_point() -> AsnOid []
+    todo("x509-nv.x509crl.oid_issuing_distribution_point")
+
+// Why a certificate was revoked.
+//
+// RFC 5280 section 5.3.1's `CRLReason`.  The numbering has a hole:
+// value 7 is not used, which is the kind of fact a reader checks
+// against the specification and a writer gets wrong.
+pub enum X509CrlReason
+    // 0.  No reason given.  RFC 5280 says an entry SHOULD NOT carry a
+    // reason extension holding this value, because an absent extension
+    // already means it.
+    X509ReasonUnspecified
+    // 1.  The private key is known or suspected to be compromised.
+    X509ReasonKeyCompromise
+    // 2.  The CA's own key is compromised, which invalidates
+    // everything it signed.
+    X509ReasonCaCompromise
+    // 3.  The subject's affiliation changed — they left the
+    // organisation named in the certificate.
+    X509ReasonAffiliationChanged
+    // 4.  A replacement certificate has been issued.
+    X509ReasonSuperseded
+    // 5.  The certificate is no longer needed for the purpose it was
+    // issued for.
+    X509ReasonCessationOfOperation
+    // 6.  The certificate is suspended, and may be un-suspended by a
+    // later list with `removeFromCRL`.  Value 7 is unused.
+    X509ReasonCertificateHold
+    // 8.  The entry is being withdrawn from a DELTA CRL, which is the
+    // only place this value is meaningful.
+    X509ReasonRemoveFromCrl
+    // 9.  A privilege in the certificate has been withdrawn.
+    X509ReasonPrivilegeWithdrawn
+    // 10.  An attribute authority's key is compromised.
+    X509ReasonAaCompromise
+
+// One revoked certificate.
+//
+// A plain struct rather than a `@value` one because it is a `Result`
+// payload and an option payload throughout, and a `@value` struct may
+// be neither (E2015).
+pub struct X509RevokedCert
+    // The certificate's serial number, as the INTEGER's content bytes.
+    // The same form `X509Cert.serial` takes, so the two compare
+    // directly.
+    serial: Bytes
+    // When the issuer revoked it.
+    revocation_date: CivilDateTime
+    // The entry's own extensions, in order: the reason, the
+    // invalidity date, the certificate issuer of an indirect list.
+    extensions: [AsnExtension]
+
+// A certificate revocation list, read.
+pub struct X509Crl
+    // 1 or 2.  A list with extensions must be 2.
+    version: Int
+    // The algorithm named INSIDE the tbsCertList.
+    signature_algorithm: AsnAlgorithmId
+    // Whose list it is.  A CRL revokes certificates this name issued.
+    issuer: AsnName
+    // When the list was produced.
+    this_update: CivilDateTime
+    // When the next list is due, when the issuer said.  `None` is
+    // conforming in RFC 5280 and means the issuer does not commit to
+    // one; a caller that treated a list with no `nextUpdate` as valid
+    // forever would be trusting a snapshot indefinitely.
+    next_update: ?CivilDateTime
+    // The revoked certificates, in the order they were written.  Empty
+    // is conforming: a CA with nothing revoked still publishes a list,
+    // and an empty list is the statement that nothing is revoked.
+    entries: [X509RevokedCert]
+    // The list's own extensions: the CRL number, the delta indicator,
+    // the issuing distribution point, the authority key identifier.
+    extensions: [AsnExtension]
+    // The algorithm named OUTSIDE, beside the signature.
+    outer_algorithm: AsnAlgorithmId
+    // The signature over the tbsCertList.
+    signature: AsnBitString
+    // The span of the tbsCertList, exactly as it arrived.  The bytes
+    // the signature covers.
+    tbs: AsnSpan
+
+// The revocation list one DER document holds.
+//
+// Trailing bytes are refused.  The spans in the answer point into
+// `src`, which the caller must keep.
+//
+// ```novo
+// use std.bytes
+// use asn1read
+// use x509crl
+//
+// fn main() [io]
+//     let der = bytes.zeros(0)
+//     match x509crl.parse(der, asn1read.default_limits())
+//         Ok(l)  => println("${list.len(l.entries)}")
+//         Err(e) => println(e.message())
+// ```
+pub fn parse(src: Bytes, limits: AsnLimits) -> Result<X509Crl, X509Error> []
+    todo("x509-nv.x509crl.parse")
+
+// The bytes of the tbsCertList, exactly as they arrived.
+//
+// What the list's signature is computed over.  A CRL is signed by the
+// CA whose certificates it revokes, so the key that verifies it is
+// that CA's, and `x509verify.verify_crl` is the call that puts the two
+// together.
+pub fn tbs_bytes(src: Bytes, l: X509Crl) -> Bytes []
+    todo("x509-nv.x509crl.tbs_bytes")
+
+// The raw signature bytes, out of the BIT STRING they travel in.
+pub fn signature_bytes(l: X509Crl) -> Result<Bytes, X509Error> []
+    todo("x509-nv.x509crl.signature_bytes")
+
+// Whether the list names this serial number.
+//
+// **A pure lookup.**  No clock, no network, no file: the list is a
+// value the caller already has and the serial is bytes, so the same
+// two inputs give the same answer forever.  That is what lets a replay
+// of a request log produce the answers it produced the first time.
+//
+// It does NOT check that the list came from the right issuer, is
+// current, or was signed by anybody.  `is_revoked_by` does the first,
+// `check_current_at` the second, `x509verify.verify_crl` the third,
+// and each is separate so that a caller can see which it skipped.
+//
+// ```novo
+// use std.bytes
+// use asn1read
+// use x509crl
+//
+// fn main() [io]
+//     let der = bytes.zeros(0)
+//     let serial = bytes.from_hex("01") ?? bytes.zeros(0)
+//     match x509crl.parse(der, asn1read.default_limits())
+//         Err(e) => println(e.message())
+//         Ok(l)  => println("${x509crl.is_revoked(l, serial)}")
+// ```
+pub fn is_revoked(l: X509Crl, serial: Bytes) -> Bool []
+    todo("x509-nv.x509crl.is_revoked")
+
+// Whether the list revokes this certificate, issuer name included.
+//
+// A serial number is unique only under one issuer, so a lookup that
+// did not compare the names would answer "not revoked" for a serial
+// this list has never heard of — the wrong answer, given confidently.
+// The comparison is over the name ENCODINGS, as everywhere else here.
+pub fn is_revoked_by(crl_src: Bytes, l: X509Crl, cert_src: Bytes, c: X509Cert) -> Bool []
+    todo("x509-nv.x509crl.is_revoked_by")
+
+// The entry for this serial number, or `None`.
+//
+// What a caller that wants the reason or the date calls, rather than
+// asking whether it is revoked and then looking again.
+pub fn entry_for(l: X509Crl, serial: Bytes) -> ?X509RevokedCert []
+    todo("x509-nv.x509crl.entry_for")
+
+// The refusal a revoked certificate produces, or `None` when the list
+// does not name it.
+//
+// `X509CertRevoked`, carrying the serial as hex and the reason as the
+// name RFC 5280 gives it.  The one call a path validation makes.
+pub fn check_revoked(crl_src: Bytes, l: X509Crl, cert_src: Bytes, c: X509Cert,
+                     limits: AsnLimits) -> ?X509Error []
+    todo("x509-nv.x509crl.check_revoked")
+
+// Every entry, in the order the list wrote them.
+pub fn entries_of(l: X509Crl) -> [X509RevokedCert] []
+    todo("x509-nv.x509crl.entries_of")
+
+// How many certificates the list revokes.
+pub fn entry_count(l: X509Crl) -> Int []
+    todo("x509-nv.x509crl.entry_count")
+
+// The reason an entry gives, or `None` when it gives none.
+//
+// An absent `cRLReasons` extension means `unspecified`, and this
+// answers `None` rather than inventing the enum value, because RFC
+// 5280 section 5.3.1 says an entry SHOULD NOT write `unspecified`
+// explicitly and the two cases are therefore worth telling apart.
+pub fn revocation_reason(e: X509RevokedCert,
+                         limits: AsnLimits) -> Result<?X509CrlReason, X509Error> []
+    todo("x509-nv.x509crl.revocation_reason")
+
+// The number RFC 5280 section 5.3.1 gives a reason: 0 through 6, then
+// 8, 9 and 10.
+//
+// ```novo
+// use x509crl
+//
+// fn main() [io]
+//     println("${x509crl.reason_number(X509ReasonRemoveFromCrl)}")   // 8
+// ```
+pub fn reason_number(r: X509CrlReason) -> Int []
+    todo("x509-nv.x509crl.reason_number")
+
+// The reason a number names, or `None` for one the enumeration does
+// not use.
+//
+// `None` for 7, which is the hole in the numbering, and for anything
+// above 10.
+pub fn reason_named(n: Int) -> ?X509CrlReason []
+    todo("x509-nv.x509crl.reason_named")
+
+// The ASN.1 module's own name for a reason — `"keyCompromise"`,
+// `"cessationOfOperation"`.
+pub fn reason_name(r: X509CrlReason) -> Str []
+    todo("x509-nv.x509crl.reason_name")
+
+// The entry's `invalidityDate`, or `None`.
+//
+// When the key is BELIEVED to have become invalid, which may be before
+// the revocation date and is the date a caller re-checking old
+// signatures wants.  RFC 5280 section 5.3.2.
+pub fn invalidity_date(e: X509RevokedCert,
+                       limits: AsnLimits) -> Result<?CivilDateTime, X509Error> []
+    todo("x509-nv.x509crl.invalidity_date")
+
+// The entry's `certificateIssuer`, or `None`.
+//
+// Present only in an indirect CRL, where it names the issuer of this
+// entry and of every entry after it until the next one.  A reader that
+// ignored it would attribute revocations to the wrong CA.
+pub fn certificate_issuer(e: X509RevokedCert,
+                          limits: AsnLimits) -> Result<?[X509GeneralName], X509Error> []
+    todo("x509-nv.x509crl.certificate_issuer")
+
+// The list's `cRLNumber`, as the INTEGER's content bytes, or `None`.
+//
+// Bytes and not a number: a CRL number is an integer with no stated
+// bound, and a CA that has published for twenty years may have one
+// that does not fit an `Int`.  Comparing two is comparing two
+// big-endian byte strings of the same length.
+pub fn crl_number(l: X509Crl, limits: AsnLimits) -> Result<?Bytes, X509Error> []
+    todo("x509-nv.x509crl.crl_number")
+
+// The base CRL number a delta list applies to, or `None` when the list
+// is not a delta.
+//
+// A delta is read and NOT applied: combining one with its base is a
+// state machine over two documents, and a caller holds both.
+pub fn delta_crl_indicator(l: X509Crl, limits: AsnLimits) -> Result<?Bytes, X509Error> []
+    todo("x509-nv.x509crl.delta_crl_indicator")
+
+// Whether the instant falls between `thisUpdate` and `nextUpdate`,
+// inclusive.
+//
+// A list with no `nextUpdate` is current at any instant at or after
+// `thisUpdate` — which is what the encoding means, and is why a caller
+// that needs a freshness bound has to impose its own.
+pub fn is_current_at(l: X509Crl, at: CivilDateTime) -> Bool []
+    todo("x509-nv.x509crl.is_current_at")
+
+// The refusal a stale or premature list produces at this instant, or
+// `None`.
+//
+// `X509CrlNotCurrent`, carrying both moments as text so a report can
+// say how stale.
+pub fn check_current_at(l: X509Crl, at: CivilDateTime) -> ?X509Error []
+    todo("x509-nv.x509crl.check_current_at")
+
+// The list's own extensions, in order.
+pub fn extensions_of(l: X509Crl) -> [AsnExtension] []
+    todo("x509-nv.x509crl.extensions_of")
+
+// Whose list it is.
+pub fn issuer_of(l: X509Crl) -> AsnName []
+    todo("x509-nv.x509crl.issuer_of")

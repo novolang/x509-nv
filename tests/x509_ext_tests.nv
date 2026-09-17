@@ -1,0 +1,340 @@
+// tests/x509_ext_tests.nv — the extensions, and the one rule every
+// reader has to implement.
+//
+// RED ON PURPOSE, like every suite here: each assertion reaches
+// `not implemented: x509-nv.<module>.<fn>`.
+//
+// The numbering of the key-usage bits and the extension OIDs are RFC
+// 5280's, and the encodings asserted below are the ones every
+// certificate on the internet carries.  Where an encoding was not
+// certain the assertion is about the structure and the rule, and the
+// comment names the section.
+
+use std.test
+use std.bytes
+use asn1read
+use asn1oid
+use x509ext
+use x509err
+
+fn limits() -> AsnLimits
+    asn1read.default_limits()
+
+// The `keyUsage` value a certificate authority carries: `03 02 01 86`
+// as a BIT STRING, which is one unused bit over the byte `1000 0110`.
+// Bits 0, 5 and 6 — digitalSignature, keyCertSign and cRLSign.
+fn ca_key_usage() -> AsnBitString
+    AsnBitString { unused_bits: 1, data: bytes.from_hex("86") ?? bytes.zeros(0) }
+
+// The `keyUsage` value a TLS server certificate carries: five unused
+// bits over `1010 0000`.  Bits 0 and 2 — digitalSignature and
+// keyEncipherment.
+fn server_key_usage() -> AsnBitString
+    AsnBitString { unused_bits: 5, data: bytes.from_hex("a0") ?? bytes.zeros(0) }
+
+@test
+fn test_the_key_usage_bits_are_numbered_as_rfc_5280_numbers_them() [io]
+    // RFC 5280 section 4.2.1.3.  Bit 0 is the MOST significant bit of
+    // the first content byte, which is the numbering the ASN.1 module
+    // uses and the opposite of what a programmer guesses.
+    test.case("the nine numbers are the specification's")
+    test.assert_eq(x509ext.X509_KU_DIGITAL_SIGNATURE, 0)
+    test.assert_eq(x509ext.X509_KU_NON_REPUDIATION, 1)
+    test.assert_eq(x509ext.X509_KU_KEY_ENCIPHERMENT, 2)
+    test.assert_eq(x509ext.X509_KU_DATA_ENCIPHERMENT, 3)
+    test.assert_eq(x509ext.X509_KU_KEY_AGREEMENT, 4)
+    test.assert_eq(x509ext.X509_KU_KEY_CERT_SIGN, 5)
+    test.assert_eq(x509ext.X509_KU_CRL_SIGN, 6)
+    test.assert_eq(x509ext.X509_KU_ENCIPHER_ONLY, 7)
+    test.assert_eq(x509ext.X509_KU_DECIPHER_ONLY, 8)
+
+    test.case("a CA's 03 02 01 86 is digitalSignature, keyCertSign and cRLSign")
+    let ca = x509ext.key_usage_of_bits(ca_key_usage())
+    test.assert(ca.digital_signature)
+    test.assert(ca.key_cert_sign)
+    test.assert(ca.crl_sign)
+    test.assert(not ca.key_encipherment)
+    test.assert(not ca.key_agreement)
+    test.assert(not ca.decipher_only)
+
+    test.case("and key_usage_bit reads the same bits by their numbers")
+    test.assert(x509ext.key_usage_bit(ca, x509ext.X509_KU_KEY_CERT_SIGN))
+    test.assert(x509ext.key_usage_bit(ca, x509ext.X509_KU_CRL_SIGN))
+    test.assert(not x509ext.key_usage_bit(ca, x509ext.X509_KU_KEY_ENCIPHERMENT))
+
+    test.case("a TLS server's 03 02 05 a0 is digitalSignature and keyEncipherment")
+    let srv = x509ext.key_usage_of_bits(server_key_usage())
+    test.assert(srv.digital_signature)
+    test.assert(srv.key_encipherment)
+    test.assert(not srv.key_cert_sign)
+
+    test.case("a bit past the end of a short BIT STRING is not set, and is not an error")
+    test.assert(not x509ext.key_usage_bit(srv, x509ext.X509_KU_DECIPHER_ONLY))
+
+    test.case("and a number outside 0 ..= 8 is not set either")
+    test.assert(not x509ext.key_usage_bit(ca, 9))
+    test.assert(not x509ext.key_usage_bit(ca, -1))
+
+@test
+fn test_a_key_usage_bit_has_the_name_the_asn1_module_gives_it() [io]
+    test.case("the names are the standard's spelling")
+    test.assert_eq_str(x509ext.key_usage_name(0), "digitalSignature")
+    test.assert_eq_str(x509ext.key_usage_name(5), "keyCertSign")
+    test.assert_eq_str(x509ext.key_usage_name(6), "cRLSign")
+    test.assert_eq_str(x509ext.key_usage_name(8), "decipherOnly")
+
+    test.case("and a number outside the range has no name")
+    test.assert_eq_str(x509ext.key_usage_name(9), "")
+
+@test
+fn test_an_unknown_critical_extension_is_a_reason_to_refuse() [io]
+    // RFC 5280 section 4.2: "A certificate-using system MUST reject the
+    // certificate if it encounters a critical extension it does not
+    // recognize."  The flag exists so a CA can add a constraint and be
+    // sure no old reader will quietly ignore it.
+    let private_oid = asn1oid.oid([1, 3, 6, 1, 4, 1, 99999, 1])
+    let critical = AsnExtension { oid: private_oid, critical: true,
+        value: bytes.zeros(0) }
+    let harmless = AsnExtension { oid: private_oid, critical: false,
+        value: bytes.zeros(0) }
+
+    test.case("a critical extension nobody recognises is listed")
+    test.assert_eq(list.len(x509ext.unknown_critical([critical], [])), 1)
+
+    test.case("and refusing is what check_unknown_critical answers")
+    match x509ext.check_unknown_critical([critical], 0, [])
+        None    => test.fail("RFC 5280 section 4.2 requires the certificate to be refused")
+        Some(e) =>
+            test.assert_eq_str(x509err.code(e), "unknown-critical-extension")
+            test.assert(x509err.is_rule_failure(e))
+            test.assert(not x509err.is_malformed(e))
+
+    test.case("the refusal names WHICH certificate of the chain")
+    match x509ext.check_unknown_critical([critical], 3, [])
+        None    => test.fail("still unrecognised")
+        Some(e) => test.assert_eq(x509err.error_index(e), 3)
+
+    test.case("the same extension NOT marked critical is ignored, which is the flag's whole job")
+    test.assert_eq(list.len(x509ext.unknown_critical([harmless], [])), 0)
+    match x509ext.check_unknown_critical([harmless], 0, [])
+        Some(_) => test.fail("a non-critical extension may be ignored")
+        None    => test.assert(true)
+
+    test.case("and a caller that implements it says so, and it stops being unknown")
+    test.assert_eq(list.len(x509ext.unknown_critical([critical], [private_oid])), 0)
+    match x509ext.check_unknown_critical([critical], 0, [private_oid])
+        Some(_) => test.fail("the caller named the OID as one it handles")
+        None    => test.assert(true)
+
+@test
+fn test_the_extensions_rfc_5280_defines_are_the_ones_this_package_knows() [io]
+    // The `2.5.29.*` arc is X.509's own.  Four of these are published
+    // by asn1-nv and are named through it, so that one OID has one
+    // home.
+    test.case("the four asn1-nv publishes")
+    test.assert_eq_str(asn1oid.oid_text(asn1oid.oid_key_usage()), "2.5.29.15")
+    test.assert_eq_str(asn1oid.oid_text(asn1oid.oid_subject_alt_name()), "2.5.29.17")
+    test.assert_eq_str(asn1oid.oid_text(asn1oid.oid_basic_constraints()), "2.5.29.19")
+    test.assert_eq_str(asn1oid.oid_text(asn1oid.oid_ext_key_usage()), "2.5.29.37")
+
+    test.case("and the ones this package adds")
+    test.assert_eq_str(asn1oid.oid_text(x509ext.oid_subject_key_identifier()),
+                       "2.5.29.14")
+    test.assert_eq_str(asn1oid.oid_text(x509ext.oid_issuer_alt_name()), "2.5.29.18")
+    test.assert_eq_str(asn1oid.oid_text(x509ext.oid_name_constraints()), "2.5.29.30")
+    test.assert_eq_str(asn1oid.oid_text(x509ext.oid_crl_distribution_points()),
+                       "2.5.29.31")
+    test.assert_eq_str(asn1oid.oid_text(x509ext.oid_certificate_policies()),
+                       "2.5.29.32")
+    test.assert_eq_str(asn1oid.oid_text(x509ext.oid_policy_mappings()), "2.5.29.33")
+    test.assert_eq_str(asn1oid.oid_text(x509ext.oid_authority_key_identifier()),
+                       "2.5.29.35")
+    test.assert_eq_str(asn1oid.oid_text(x509ext.oid_policy_constraints()), "2.5.29.36")
+    test.assert_eq_str(asn1oid.oid_text(x509ext.oid_inhibit_any_policy()), "2.5.29.54")
+
+    test.case("anyPolicy and anyExtendedKeyUsage sit under their own extensions")
+    test.assert_eq_str(asn1oid.oid_text(x509ext.oid_any_policy()), "2.5.29.32.0")
+    test.assert_eq_str(asn1oid.oid_text(x509ext.oid_any_extended_key_usage()),
+                       "2.5.29.37.0")
+
+    test.case("known_oids holds every one of them")
+    test.assert(list.len(x509ext.known_oids()) >= 13)
+
+@test
+fn test_the_extended_key_usage_purposes_are_the_pkix_ones() [io]
+    // RFC 5280 section 4.2.1.12.  The arc is `1.3.6.1.5.5.7.3`, and the
+    // two a TLS deployment cares about are the first two under it.
+    test.case("server and client authentication")
+    test.assert_eq_str(asn1oid.oid_text(x509ext.oid_kp_server_auth()),
+                       "1.3.6.1.5.5.7.3.1")
+    test.assert_eq_str(asn1oid.oid_text(x509ext.oid_kp_client_auth()),
+                       "1.3.6.1.5.5.7.3.2")
+
+    test.case("code signing, email protection, time stamping and OCSP signing")
+    test.assert_eq_str(asn1oid.oid_text(x509ext.oid_kp_code_signing()),
+                       "1.3.6.1.5.5.7.3.3")
+    test.assert_eq_str(asn1oid.oid_text(x509ext.oid_kp_email_protection()),
+                       "1.3.6.1.5.5.7.3.4")
+    test.assert_eq_str(asn1oid.oid_text(x509ext.oid_kp_time_stamping()),
+                       "1.3.6.1.5.5.7.3.8")
+    test.assert_eq_str(asn1oid.oid_text(x509ext.oid_kp_ocsp_signing()),
+                       "1.3.6.1.5.5.7.3.9")
+
+    test.case("a purpose is permitted when the list names it")
+    let server = x509ext.oid_kp_server_auth()
+    let client = x509ext.oid_kp_client_auth()
+    test.assert(x509ext.has_key_purpose([server], server))
+    test.assert(not x509ext.has_key_purpose([client], server))
+
+    test.case("and anyExtendedKeyUsage permits every purpose, which is the rule that is forgotten")
+    test.assert(x509ext.has_key_purpose([x509ext.oid_any_extended_key_usage()], server))
+
+@test
+fn test_basic_constraints_absent_means_end_entity_and_not_permission() [io]
+    // RFC 5280 section 4.2.1.9.  A missing extension means the
+    // certificate is not a CA — treating its absence as permission is
+    // the bug that made this the most quoted section of the document.
+    test.case("no extensions at all is no basicConstraints")
+    match x509ext.basic_constraints([], limits())
+        Err(e)      => test.fail(e.message())
+        Ok(Some(_)) => test.fail("there was no extension to read")
+        Ok(None)    => test.assert(true)
+
+    test.case("and is_ca is false, not unknown")
+    match x509ext.is_ca([], limits())
+        Err(e) => test.fail(e.message())
+        Ok(v)  => test.assert(not v)
+
+    test.case("keyUsage's absence means the opposite: no restriction at all")
+    match x509ext.key_usage([], limits())
+        Err(e)      => test.fail(e.message())
+        Ok(Some(_)) => test.fail("there was no extension to read")
+        Ok(None)    => test.assert(true)
+
+    test.case("an absent path length is -1, which means unlimited")
+    let unlimited = X509BasicConstraints { is_ca: true, path_len: -1 }
+    test.assert_eq(unlimited.path_len, -1)
+    test.assert(unlimited.is_ca)
+
+@test
+fn test_a_general_name_keeps_the_form_it_arrived_in() [io]
+    // RFC 5280 section 4.2.1.6.  The hostnames are in `dNSName`, not in
+    // the common name — RFC 6125 deprecated that in 2011 and RFC 9525
+    // removed it in 2024.
+    let dns = X509DnsName(name: "example.com")
+    let wild = X509DnsName(name: "*.example.com")
+    let mail = X509EmailAddress(address: "ca@example.com")
+    let uri = X509Uri(uri: "http://crl.example.com/a.crl")
+    let ip = X509IpAddress(octets: bytes.from_byte_list([192, 0, 2, 1]))
+
+    test.case("dns_names picks out only the DNS names")
+    let names = [dns, wild, mail, uri, ip]
+    test.assert_eq(list.len(x509ext.dns_names(names)), 2)
+
+    test.case("ip_addresses picks out only the addresses, as their four or sixteen bytes")
+    let addrs = x509ext.ip_addresses(names)
+    test.assert_eq(list.len(addrs), 1)
+    test.assert_eq(bytes.len(addrs[0]), 4)
+
+    test.case("and general_name_text prefixes each form the way a certificate dump does")
+    test.assert_eq_str(x509ext.general_name_text(dns), "DNS:example.com")
+    test.assert_eq_str(x509ext.general_name_text(mail), "email:ca@example.com")
+    test.assert_eq_str(x509ext.general_name_text(ip), "IP:192.0.2.1")
+
+@test
+fn test_a_name_constraint_says_nothing_about_a_form_it_does_not_mention() [io]
+    // RFC 5280 section 4.2.1.10, and the rule that surprises people: a
+    // constraint on DNS names does not constrain email addresses.  A
+    // reader that refused every form not listed would break every
+    // constrained CA in existence.
+    let permitted = X509GeneralSubtree { base: X509DnsName(name: "example.com"),
+        minimum: 0, maximum: -1 }
+    let c = X509NameConstraints { permitted: [permitted], excluded: [] }
+
+    test.case("a DNS name below the subtree is permitted")
+    test.assert(x509ext.subtree_contains(permitted, X509DnsName(name: "a.example.com")))
+    test.assert(x509ext.constraints_permit(c, X509DnsName(name: "a.example.com")))
+
+    test.case("a DNS name that merely ends with the same characters is not")
+    test.assert(not x509ext.subtree_contains(permitted,
+        X509DnsName(name: "notexample.com")))
+
+    test.case("a DNS name outside it is refused")
+    test.assert(not x509ext.constraints_permit(c, X509DnsName(name: "example.org")))
+
+    test.case("and an email address is permitted, because no email subtree was named")
+    test.assert(x509ext.constraints_permit(c, X509EmailAddress(address: "a@other.test")))
+
+    test.case("an exclusion beats a permission")
+    let excluded = X509GeneralSubtree { base: X509DnsName(name: "bad.example.com"),
+        minimum: 0, maximum: -1 }
+    let both = X509NameConstraints { permitted: [permitted], excluded: [excluded] }
+    test.assert(not x509ext.constraints_permit(both, X509DnsName(name: "bad.example.com")))
+
+    test.case("RFC 5280 requires minimum to be 0 and maximum to be absent")
+    test.assert_eq(permitted.minimum, 0)
+    test.assert_eq(permitted.maximum, -1)
+
+@test
+fn test_a_distribution_point_is_an_address_and_this_package_does_not_fetch_it() [io]
+    // RFC 5280 section 4.2.1.13.  Reading the address is arithmetic
+    // over bytes; going and getting it is `[net]`, which this layer's
+    // budget does not admit.
+    let p = X509DistributionPoint { full_name: [X509Uri(uri: "http://crl.test/a.crl")],
+        relative_name: [], crl_issuer: [], reasons: -1 }
+
+    test.case("the URIs come out in order")
+    let uris = x509ext.distribution_point_uris(p)
+    test.assert_eq(list.len(uris), 1)
+    test.assert_eq_str(uris[0], "http://crl.test/a.crl")
+
+    test.case("an absent reasons field is -1, which means every reason")
+    test.assert_eq(p.reasons, -1)
+
+    test.case("and no crl_issuer means the certificate's own issuer publishes the list")
+    test.assert_eq(list.len(p.crl_issuer), 0)
+
+@test
+fn test_a_policy_is_read_and_anypolicy_is_honoured() [io]
+    // RFC 5280 section 4.2.1.4.  The policies are read; the policy
+    // PROCESSING of section 6.1 is not implemented and the README says
+    // so, so this asserts what is offered instead.
+    let mine = asn1oid.oid([1, 3, 6, 1, 4, 1, 99999, 2])
+    let info = X509PolicyInfo { oid: mine, qualifiers: [] }
+    let any = X509PolicyInfo { oid: x509ext.oid_any_policy(), qualifiers: [] }
+
+    test.case("a certificate that asserts a policy asserts it")
+    test.assert(x509ext.asserts_policy([info], mine))
+
+    test.case("one that does not, does not")
+    test.assert(not x509ext.asserts_policy([info], x509ext.oid_kp_server_auth()))
+
+    test.case("and anyPolicy asserts every policy")
+    test.assert(x509ext.asserts_policy([any], mine))
+
+    test.case("a qualifier's value is carried whole and unparsed")
+    let q = X509PolicyQualifier { oid: asn1oid.oid([1, 3, 6, 1, 5, 5, 7, 2, 1]),
+        value: bytes.zeros(0) }
+    test.assert_eq(bytes.len(q.value), 0)
+
+@test
+fn test_finding_an_extension_by_oid_is_separate_from_reading_it() [io]
+    let e = AsnExtension { oid: asn1oid.oid_key_usage(), critical: true,
+        value: bytes.zeros(0) }
+
+    test.case("find answers the extension when it is there")
+    match x509ext.find([e], asn1oid.oid_key_usage())
+        None    => test.fail("the list holds it")
+        Some(x) => test.assert(x.critical)
+
+    test.case("and None when it is not")
+    match x509ext.find([e], asn1oid.oid_basic_constraints())
+        Some(_) => test.fail("the list does not hold it")
+        None    => test.assert(true)
+
+    test.case("is_critical is false for an extension that is absent")
+    test.assert(x509ext.is_critical([e], asn1oid.oid_key_usage()))
+    test.assert(not x509ext.is_critical([e], asn1oid.oid_basic_constraints()))
+
+    test.case("extension_value hands the DER over whole, because it is inside the signed bytes")
+    test.assert_eq(bytes.len(x509ext.extension_value(e)), 0)
