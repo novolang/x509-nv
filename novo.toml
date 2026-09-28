@@ -1,6 +1,6 @@
 [package]
 name        = "x509-nv"
-version     = "0.0.1"
+version     = "0.0.2"
 description = "RFC 5280 over asn1-nv: certificates, revocation lists and PKCS #10 requests parsed into typed values whose bytes are SPANS into the caller's own buffer, the thirteen extensions RFC 5280 defines including the unknown-critical rule, and path validation as a PURE FUNCTION of a chain, a trust set, an instant and a caller-supplied signature verifier — so no algorithm set is pinned here and no RSA exists to pin.  Interface only — every body is a todo()."
 license     = "Apache-2.0"
 
@@ -73,7 +73,7 @@ novo        = ">= 0.9.0"
 #
 # Under the caret rule `^0.0.1` means exactly 0.0.1: a `0.0.x` version
 # has no compatible neighbours.
-asn1-nv = "^0.0.1"
+asn1-nv = "^0.1.0"
 
 # calendar-nv supplies `CivilDateTime`, which is what asn1-nv's
 # `utc_time_at` and `generalized_time_at` answer and therefore what a
@@ -84,7 +84,7 @@ asn1-nv = "^0.0.1"
 # should state.  `civil.compare_datetime` is also the comparison that
 # decides whether an instant falls inside a validity period.  `core`,
 # so the layer rule holds.
-calendar-nv = "^0.0.2"
+calendar-nv = "^0.2.0"
 
 # NOT p256-nv, NOT ed25519-nv, NOT crypto-nv, and that is the design
 # rather than an omission.
