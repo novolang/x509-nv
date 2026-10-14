@@ -1,8 +1,5 @@
 // tests/x509_cert_tests.nv — a certificate, its bytes and its dates.
 //
-// RED ON PURPOSE, like every suite here: each assertion reaches
-// `not implemented: x509-nv.<module>.<fn>`.
-//
 // The two facts this suite exists to pin are the two the rest of the
 // package depends on.  The bytes a signature covers come back exactly
 // as they arrived, because that is what a signature is over.  And the

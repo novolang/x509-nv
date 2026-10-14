@@ -1,15 +1,10 @@
 [package]
 name        = "x509-nv"
-version     = "0.0.2"
-description = "RFC 5280 over asn1-nv: certificates, revocation lists and PKCS #10 requests parsed into typed values whose bytes are SPANS into the caller's own buffer, the thirteen extensions RFC 5280 defines including the unknown-critical rule, and path validation as a PURE FUNCTION of a chain, a trust set, an instant and a caller-supplied signature verifier — so no algorithm set is pinned here and no RSA exists to pin.  Interface only — every body is a todo()."
+version     = "0.1.0"
+description = "RFC 5280 over asn1-nv: certificates, revocation lists and PKCS #10 requests parsed into typed values whose bytes are SPANS into the caller's own buffer, the thirteen extensions RFC 5280 defines including the unknown-critical rule, and path validation as a PURE FUNCTION of a chain, a trust set, an instant and a caller-supplied signature verifier — so no algorithm set is pinned here and no RSA exists to pin."
 license     = "Apache-2.0"
 
-# An INTERFACE release: every `pub fn` body is a `todo()`, so the
-# signatures and the effect rows are published and nothing is
-# implemented.  `novo pkg publish` recognises the shape and requires
-# both the draft stability and the 0.0.x version; the first
-# implementation is the 0.1.0 published over it.
-stability   = "draft"
+stability   = "experimental"
 
 # `core`.  Reading a certificate is arithmetic over bytes the host
 # already holds, and the three things a validator would otherwise reach
@@ -47,7 +42,7 @@ category    = "crypto"
 tags = ["x509", "rfc-5280", "certificate", "crl", "csr", "pkcs10", "pkix", "path-validation", "der", "sans-io"]
 repository  = "https://github.com/novolang/x509-nv"
 maintainers = ["novo-lang"]
-novo        = ">= 0.9.0"
+novo        = ">= 0.20.2"
 
 # A library: no `main`, so `novo pkg build` type-checks and
 # effect-checks every module under `src/` and writes no binary.

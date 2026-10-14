@@ -1,8 +1,5 @@
 // x509csr — a PKCS #10 certification request, read.
 //
-// Every body is a `todo()`.  The signatures are the design, and the
-// compiler checks them as claims; see the README for the stamp.
-//
 // WHAT A CERTIFICATION REQUEST IS.  RFC 2986 — PKCS #10 — is how
 // somebody asks a CA for a certificate.  The request carries the name
 // the requester wants, the PUBLIC key it wants certified, and a set of
@@ -32,6 +29,13 @@
 // log rather than a parser.  The README names it as out of scope.
 
 use std.bytes
+use asn1oid
+use asn1pkix
+use asn1read
+use asn1univ
+use x509err
+use x509ext
+use x509name
 
 // The version of a PKCS #10 request.
 //
@@ -45,7 +49,7 @@ pub const X509_CSR_VERSION_1 = 0
 // carrying the extensions the requester would like.  Defined in RFC
 // 2985, and the attribute a subject alternative name travels in.
 pub fn oid_extension_request() -> AsnOid []
-    todo("x509-nv.x509csr.oid_extension_request")
+    asn1oid.oid([1, 2, 840, 113549, 1, 9, 14])
 
 // `1.2.840.113549.1.9.7` — `challengePassword`, the PKCS #9 attribute
 // holding a shared secret a CA may use to authorise revocation later.
@@ -54,7 +58,7 @@ pub fn oid_extension_request() -> AsnOid []
 // weak authenticator and RFC 2985 says as much.  It is read because
 // requests carry it, not because it should be relied on.
 pub fn oid_challenge_password() -> AsnOid []
-    todo("x509-nv.x509csr.oid_challenge_password")
+    asn1oid.oid([1, 2, 840, 113549, 1, 9, 7])
 
 // One attribute of a certification request.
 //
@@ -91,6 +95,102 @@ pub struct X509Csr
     // The bytes the signature covers.
     info: AsnSpan
 
+// ── the parts the readers below share ──────────────────────────────
+
+// An asn1-nv refusal as this package's own.
+//
+// The cause is carried whole rather than flattened to a string, so a
+// caller that wants to know it was a non-minimal length rather than a
+// truncation can match on `decode_cause`.
+fn not_der<T>(r: Result<T, AsnDecodeError>) -> Result<T, X509Error> []
+    match r
+        Ok(v)  => Ok(v)
+        Err(e) => Err(X509NotDer(cause: e))
+
+// The children of the SEQUENCE at `off`, refusing one with fewer than
+// the named fields.
+fn fields(src: Bytes, off: Int, limits: AsnLimits, names: [Str]) -> Result<[AsnSpan], X509Error> []
+    let kids = not_der(asn1univ.sequence_at(src, off, limits))!
+    if list.len(kids) < list.len(names)
+        return Err(X509MissingField(at: off, field: names[list.len(kids)]))
+    Ok(kids)
+
+// Whether `v` is exactly one DER value, with nothing after it.
+//
+// An attribute's values and an extension's value are detached copies,
+// so nothing else checks that each ends where the structure the OID
+// names ends.
+fn one_value(v: Bytes, limits: AsnLimits) -> Bool []
+    match asn1read.read_document(v, limits)
+        Ok(_)  => true
+        Err(_) => false
+
+// The Extensions SEQUENCE at `off`, in the order it was written.
+fn read_extensions(src: Bytes, off: Int, limits: AsnLimits) -> Result<[AsnExtension], X509Error> []
+    var out: [AsnExtension] = []
+    for e in not_der(asn1univ.sequence_at(src, off, limits))!
+        let parts = fields(src, e.off, limits, ["extnID", "extnValue"])!
+        // `critical BOOLEAN DEFAULT FALSE` sits between the two when it
+        // is written.
+        let critical = if list.len(parts) > 2
+            not_der(asn1univ.boolean_at(src, parts[1].off, limits))!
+        else
+            false
+        list.push(out, AsnExtension {
+            oid: not_der(asn1univ.oid_at(src, parts[0].off, limits))!,
+            critical: critical,
+            value: not_der(asn1univ.octet_string_at(src,
+                            parts[list.len(parts) - 1].off, limits))! })
+    Ok(out)
+
+// The `[0] IMPLICIT Attributes` at `off`.
+//
+// RFC 2986 writes the SET OF with its own tag REPLACED by `[0]`, so
+// `asn1univ.set_of_at` cannot be used and DER's ordering rule — which
+// that reader applies — is this module's to check.  The rule is the
+// same one: ascending order of the encodings.
+fn read_attributes(src: Bytes, off: Int,
+                   limits: AsnLimits) -> Result<[X509CsrAttribute], X509Error> []
+    let t = not_der(asn1read.peek_tag_at(src, off, limits))!
+    if t.class != AsnContext or t.number != 0
+        return Err(X509MissingField(at: off, field: "attributes"))
+    let kids = not_der(asn1read.children_at(src, off, limits))!
+    for i in 1..list.len(kids)
+        let before = bytes.to_hex(asn1read.span_bytes(src, kids[i - 1]))
+        let here = bytes.to_hex(asn1read.span_bytes(src, kids[i]))
+        if here < before
+            return Err(X509ImpossibleField(at: kids[i].off, field: "attributes",
+                                           why: "DER orders a SET OF by its encodings"))
+    var out: [X509CsrAttribute] = []
+    for a in kids
+        let pair = fields(src, a.off, limits, ["type", "values"])!
+        var values: [Bytes] = []
+        for v in not_der(asn1univ.set_of_at(src, pair[1].off, limits))!
+            list.push(values, asn1read.span_bytes(src, v))
+        list.push(out, X509CsrAttribute {
+            oid: not_der(asn1univ.oid_at(src, pair[0].off, limits))!,
+            values: values })
+    Ok(out)
+
+// The whole request at `off`, in the bytes the caller supplied.
+fn csr_at(src: Bytes, off: Int, limits: AsnLimits) -> Result<X509Csr, X509Error> []
+    let outer = fields(src, off, limits,
+                       ["certificationRequestInfo", "signatureAlgorithm", "signature"])!
+    let info = outer[0]
+    let parts = fields(src, info.off, limits,
+                       ["version", "subject", "subjectPKInfo", "attributes"])!
+    let version = not_der(asn1univ.integer_at(src, parts[0].off, limits))!
+    if version != X509_CSR_VERSION_1
+        return Err(X509BadVersion(at: parts[0].off, version: version))
+    Ok(X509Csr { version: version,
+                 subject: not_der(asn1pkix.name_at(src, parts[1].off, limits))!,
+                 public_key: not_der(asn1pkix.spki_at(src, parts[2].off, limits))!,
+                 attributes: read_attributes(src, parts[3].off, limits)!,
+                 signature_algorithm: not_der(asn1pkix.algorithm_at(src, outer[1].off,
+                                                                    limits))!,
+                 signature: not_der(asn1univ.bit_string_at(src, outer[2].off, limits))!,
+                 info: info })
+
 // The certification request one DER document holds.
 //
 // Trailing bytes are refused.  The spans in the answer point into
@@ -108,41 +208,48 @@ pub struct X509Csr
 //         Err(e) => println(e.message())
 // ```
 pub fn parse(src: Bytes, limits: AsnLimits) -> Result<X509Csr, X509Error> []
-    todo("x509-nv.x509csr.parse")
+    not_der(asn1read.read_document(src, limits))!
+    csr_at(src, 0, limits)
 
 // The bytes of the CertificationRequestInfo, exactly as they arrived.
 //
 // What the request's signature is computed over, and the one call here
 // that copies a large run of bytes.
 pub fn info_bytes(src: Bytes, r: X509Csr) -> Bytes []
-    todo("x509-nv.x509csr.info_bytes")
+    asn1read.span_bytes(src, r.info)
 
 // The span of the CertificationRequestInfo, without copying it.
 pub fn info_span(r: X509Csr) -> AsnSpan []
-    todo("x509-nv.x509csr.info_span")
+    r.info
 
 // The raw signature bytes, out of the BIT STRING they travel in.
 pub fn signature_bytes(r: X509Csr) -> Result<Bytes, X509Error> []
-    todo("x509-nv.x509csr.signature_bytes")
+    if r.signature.unused_bits != 0
+        return Err(X509ImpossibleField(at: 0, field: "signature",
+                                       why: "the BIT STRING has unused bits"))
+    Ok(bytes.clone(r.signature.data))
 
 // The name the requester asked to be certified under.
 pub fn subject_of(r: X509Csr) -> AsnName []
-    todo("x509-nv.x509csr.subject_of")
+    r.subject
 
 // The public key the requester asked to have certified.
 //
 // Hand it to `x509verify.verify_csr` to check that the requester holds
 // the matching private key.
 pub fn public_key_of(r: X509Csr) -> AsnSubjectPublicKeyInfo []
-    todo("x509-nv.x509csr.public_key_of")
+    r.public_key
 
 // Every attribute, in the order they were written.
 pub fn attributes_of(r: X509Csr) -> [X509CsrAttribute] []
-    todo("x509-nv.x509csr.attributes_of")
+    r.attributes[:]
 
 // The attribute with this OID, or `None`.
 pub fn attribute_by_oid(r: X509Csr, o: AsnOid) -> ?X509CsrAttribute []
-    todo("x509-nv.x509csr.attribute_by_oid")
+    for a in r.attributes
+        if asn1oid.equals(a.oid, o)
+            return Some(a)
+    None
 
 // The extensions the requester ASKED FOR, out of the
 // `extensionRequest` attribute.
@@ -171,7 +278,17 @@ pub fn attribute_by_oid(r: X509Csr, o: AsnOid) -> ?X509CsrAttribute []
 //                 Err(e) => println(e.message())
 // ```
 pub fn requested_extensions(r: X509Csr, limits: AsnLimits) -> Result<[AsnExtension], X509Error> []
-    todo("x509-nv.x509csr.requested_extensions")
+    match attribute_by_oid(r, oid_extension_request())
+        None    => Ok([])
+        Some(a) =>
+            // RFC 2986 gives the attribute one value, and that value is
+            // the DER of an Extensions SEQUENCE.
+            if list.len(a.values) == 0
+                return Ok([])
+            let v = a.values[0]
+            if not one_value(v, limits)
+                return Err(X509BadExtensionValue(at: 0, oid: "1.2.840.113549.1.9.14"))
+            read_extensions(v, 0, limits)
 
 // The DNS names the requester asked for, out of the requested
 // `subjectAltName`.
@@ -179,14 +296,28 @@ pub fn requested_extensions(r: X509Csr, limits: AsnLimits) -> Result<[AsnExtensi
 // The one question a CA's front end asks of nearly every request, and
 // the one an operator reads off a request before approving it.
 pub fn requested_dns_names(r: X509Csr, limits: AsnLimits) -> Result<[Str], X509Error> []
-    todo("x509-nv.x509csr.requested_dns_names")
+    let exts = requested_extensions(r, limits)!
+    match x509ext.subject_alt_name(exts, limits)
+        Err(e)       => Err(e)
+        Ok(None)     => Ok([])
+        Ok(Some(ns)) => Ok(x509ext.dns_names(ns))
 
 // The `challengePassword` attribute's value, or `None`.
 //
 // It travels in the clear inside the request.  Read because requests
 // carry it, not because it authenticates anybody.
 pub fn challenge_password(r: X509Csr, limits: AsnLimits) -> Result<?Str, X509Error> []
-    todo("x509-nv.x509csr.challenge_password")
+    match attribute_by_oid(r, oid_challenge_password())
+        None    => Ok(None)
+        Some(a) =>
+            if list.len(a.values) == 0
+                return Ok(None)
+            let v = a.values[0]
+            if not one_value(v, limits)
+                return Err(X509BadExtensionValue(at: 0, oid: "1.2.840.113549.1.9.7"))
+            match asn1univ.any_string_at(v, 0, limits)
+                Ok(s)  => Ok(Some(s))
+                Err(_) => Err(X509BadExtensionValue(at: 0, oid: "1.2.840.113549.1.9.7"))
 
 // Whether the request is conforming in the ways a reader can check on
 // its own, or the first refusal if it is not.
@@ -197,4 +328,30 @@ pub fn challenge_password(r: X509Csr, limits: AsnLimits) -> Result<?Str, X509Err
 // a malformed request is refused for being malformed rather than for
 // failing a check it was never going to reach.
 pub fn check_conformance(src: Bytes, r: X509Csr, limits: AsnLimits) -> ?X509Error []
-    todo("x509-nv.x509csr.check_conformance")
+    if r.info.off < 0 or r.info.off + r.info.len > bytes.len(src)
+        return Some(X509MissingField(at: r.info.off, field: "certificationRequestInfo"))
+    if r.version != X509_CSR_VERSION_1
+        return Some(X509BadVersion(at: r.info.off, version: r.version))
+    if x509name.is_empty(r.subject)
+        return Some(X509ImpossibleField(at: r.info.off, field: "subject",
+                                        why: "a request asks to be certified under a name"))
+    if asn1oid.arc_count(r.public_key.algorithm.algorithm) < 2
+        return Some(X509ImpossibleField(at: r.info.off, field: "subjectPKInfo",
+                                        why: "an algorithm identifier has at least two arcs"))
+    if r.public_key.public_key.unused_bits != 0
+        return Some(X509ImpossibleField(at: r.info.off, field: "subjectPublicKey",
+                                        why: "a PKIX public key has no unused bits"))
+    // An attribute type appears at most once.  Two `extensionRequest`
+    // attributes would leave a reader to guess which one the requester
+    // meant.
+    var seen: [AsnOid] = []
+    for a in r.attributes
+        if list.contains(seen, a.oid)
+            return Some(X509ImpossibleField(at: r.info.off, field: "attributes",
+                                            why: "an attribute type appears twice"))
+        list.push(seen, a.oid)
+    // And every attribute this package reads is the structure its OID
+    // names.
+    match requested_extensions(r, limits)
+        Err(e) => Some(e)
+        Ok(_)  => None

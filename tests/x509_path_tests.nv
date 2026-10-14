@@ -1,9 +1,6 @@
 // tests/x509_path_tests.nv — the verifier the caller supplies, and
 // path validation as a pure function.
 //
-// RED ON PURPOSE, like every suite here: each assertion reaches
-// `not implemented: x509-nv.<module>.<fn>`.
-//
 // Three facts are pinned here.  A signature nobody can check is an
 // ANSWER and not a failure, which is what lets a tool with no
 // cryptography package validate structure and report what it could not

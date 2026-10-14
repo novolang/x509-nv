@@ -1,9 +1,6 @@
 // x509err — every way a certificate, a revocation list or a
 // certification request can be refused.
 //
-// Every body is a `todo()`.  The signatures are the design, and the
-// compiler checks them as claims; see the README for the stamp.
-//
 // TWO KINDS OF REFUSAL, AND TELLING THEM APART IS THE WHOLE POINT.
 //
 // A document that DOES NOT PARSE is one problem: the bytes are not the
@@ -33,6 +30,8 @@
 // that wants to know it was an indefinite length rather than a
 // truncation can match on it, and a caller that only wants a line
 // calls `message`.
+
+use asn1err
 
 // X509Error is why a PKIX document was refused.
 //
@@ -150,7 +149,52 @@ impl Error for X509Error
     //     // x509: certificate 0 expired at 2026-01-01T00:00:00Z
     // ```
     fn message(self) -> Str
-        todo("x509-nv.x509err.X509Error.message")
+        match self
+            X509NotDer(cause)                            => "x509: ${cause.message()}"
+            X509MissingField(at, field)                  =>
+                "x509: the field ${field} is missing at byte ${at}"
+            X509BadVersion(at, version)                  =>
+                "x509: version ${version} at byte ${at} is not one this package reads"
+            X509BadExtensionValue(at, oid)               =>
+                "x509: the extension ${oid} at byte ${at} is not the structure that OID names"
+            X509ImpossibleField(at, field, why)          =>
+                "x509: the field ${field} at byte ${at} is impossible — ${why}"
+            X509CertExpired(index, not_after)            =>
+                "x509: certificate ${index} expired at ${not_after}"
+            X509CertNotYetValid(index, not_before)       =>
+                "x509: certificate ${index} is not valid until ${not_before}"
+            X509UnknownCriticalExtension(index, oid)     =>
+                "x509: certificate ${index} carries the critical extension ${oid}, which nothing here implements"
+            X509IssuerNotFound(index, issuer)            =>
+                "x509: no issuer for certificate ${index} with the name ${issuer}"
+            X509NotACertificateAuthority(index)          =>
+                "x509: certificate ${index} signed another and is not a certificate authority"
+            X509KeyCertSignNotPermitted(index)           =>
+                "x509: certificate ${index} signed another and its keyUsage omits keyCertSign"
+            X509PathLenExceeded(index, limit)            =>
+                "x509: certificate ${index} has more certificates below it than its pathLenConstraint of ${limit} allows"
+            X509ChainTooLong(length, limit)              =>
+                "x509: a chain of ${length} is over the policy's bound of ${limit}"
+            X509NameConstraintViolated(index, name)      =>
+                "x509: the name ${name} in certificate ${index} falls outside a name constraint"
+            X509AlgorithmMismatch(index)                 =>
+                "x509: certificate ${index} names one algorithm inside its tbsCertificate and another beside its signature"
+            X509SignatureInvalid(index)                  =>
+                "x509: the signature on certificate ${index} did not verify"
+            X509NoVerifierForAlgorithm(index, algorithm) =>
+                "x509: no verifier implements ${algorithm}, so the signature on certificate ${index} was not checked"
+            X509CertRevoked(serial, reason)              =>
+                "x509: the certificate with serial ${serial} is revoked — ${reason}"
+            X509CrlNotCurrent(this_update, next_update)  =>
+                "x509: the revocation list runs from ${this_update} to ${next_update}, which does not cover the instant"
+            X509KeyPurposeNotPermitted(index, purpose)   =>
+                "x509: certificate ${index} does not carry the key purpose ${purpose}"
+            X509EmptyChain                               =>
+                "x509: there are no certificates to validate"
+            X509EmptyTrustSet                            =>
+                "x509: the trust set holds no anchor, so no path can terminate"
+            X509PolicyUnusable(why)                      =>
+                "x509: the policy is unusable — ${why}"
 
 // Whether the refusal says the bytes are not the structure.
 //
@@ -167,7 +211,13 @@ impl Error for X509Error
 //     println("${x509err.is_malformed(e)}")   // true
 // ```
 pub fn is_malformed(e: X509Error) -> Bool []
-    todo("x509-nv.x509err.is_malformed")
+    match e
+        X509NotDer(_)                => true
+        X509MissingField(_, _)       => true
+        X509BadVersion(_, _)         => true
+        X509BadExtensionValue(_, _)  => true
+        X509ImpossibleField(_, _, _) => true
+        _                            => false
 
 // Whether the refusal says a valid document failed a rule.
 //
@@ -184,7 +234,7 @@ pub fn is_malformed(e: X509Error) -> Bool []
 //     println("${x509err.is_rule_failure(e)}")   // true
 // ```
 pub fn is_rule_failure(e: X509Error) -> Bool []
-    todo("x509-nv.x509err.is_rule_failure")
+    not is_malformed(e)
 
 // Whether the refusal is about the time the caller supplied.
 //
@@ -193,7 +243,11 @@ pub fn is_rule_failure(e: X509Error) -> Bool []
 // that goes away on its own — or arrives on its own — and a monitor
 // that warns before a certificate expires asks exactly this.
 pub fn is_validity_failure(e: X509Error) -> Bool []
-    todo("x509-nv.x509err.is_validity_failure")
+    match e
+        X509CertExpired(_, _)     => true
+        X509CertNotYetValid(_, _) => true
+        X509CrlNotCurrent(_, _)   => true
+        _                         => false
 
 // Which certificate in the chain the refusal is about, counting the
 // end-entity certificate as 0 — or -1 when it is about none.
@@ -210,7 +264,20 @@ pub fn is_validity_failure(e: X509Error) -> Bool []
 //     println("${x509err.error_index(e)}")   // 2
 // ```
 pub fn error_index(e: X509Error) -> Int []
-    todo("x509-nv.x509err.error_index")
+    match e
+        X509CertExpired(index, _)              => index
+        X509CertNotYetValid(index, _)          => index
+        X509UnknownCriticalExtension(index, _) => index
+        X509IssuerNotFound(index, _)           => index
+        X509NotACertificateAuthority(index)    => index
+        X509KeyCertSignNotPermitted(index)     => index
+        X509PathLenExceeded(index, _)          => index
+        X509NameConstraintViolated(index, _)   => index
+        X509AlgorithmMismatch(index)           => index
+        X509SignatureInvalid(index)            => index
+        X509NoVerifierForAlgorithm(index, _)   => index
+        X509KeyPurposeNotPermitted(index, _)   => index
+        _                                      => -1
 
 // The byte the refusal was found at, or -1 when the refusal is not
 // about a position in a document.
@@ -220,7 +287,13 @@ pub fn error_index(e: X509Error) -> Int []
 // answers -1, because a certificate that expired did not do so at a
 // byte.
 pub fn error_offset(e: X509Error) -> Int []
-    todo("x509-nv.x509err.error_offset")
+    match e
+        X509NotDer(cause)             => asn1err.decode_offset(cause)
+        X509MissingField(at, _)       => at
+        X509BadVersion(at, _)         => at
+        X509BadExtensionValue(at, _)  => at
+        X509ImpossibleField(at, _, _) => at
+        _                             => -1
 
 // The asn1-nv refusal underneath, when there is one.
 //
@@ -229,7 +302,9 @@ pub fn error_offset(e: X509Error) -> Int []
 // SET OF — asks `asn1err.is_der_only` of what this answers, rather
 // than reading a rendered string back.
 pub fn decode_cause(e: X509Error) -> ?AsnDecodeError []
-    todo("x509-nv.x509err.decode_cause")
+    match e
+        X509NotDer(cause) => Some(cause)
+        _                 => None
 
 // The refusal as a short stable token, for a log that is grepped
 // rather than read: `"not-der"`, `"cert-expired"`,
@@ -246,4 +321,27 @@ pub fn decode_cause(e: X509Error) -> ?AsnDecodeError []
 //     println(x509err.code(e))   // unknown-critical-extension
 // ```
 pub fn code(e: X509Error) -> Str []
-    todo("x509-nv.x509err.code")
+    match e
+        X509NotDer(_)                      => "not-der"
+        X509MissingField(_, _)             => "missing-field"
+        X509BadVersion(_, _)               => "bad-version"
+        X509BadExtensionValue(_, _)        => "bad-extension-value"
+        X509ImpossibleField(_, _, _)       => "impossible-field"
+        X509CertExpired(_, _)              => "cert-expired"
+        X509CertNotYetValid(_, _)          => "cert-not-yet-valid"
+        X509UnknownCriticalExtension(_, _) => "unknown-critical-extension"
+        X509IssuerNotFound(_, _)           => "issuer-not-found"
+        X509NotACertificateAuthority(_)    => "not-a-ca"
+        X509KeyCertSignNotPermitted(_)     => "key-cert-sign-not-permitted"
+        X509PathLenExceeded(_, _)          => "path-len-exceeded"
+        X509ChainTooLong(_, _)             => "chain-too-long"
+        X509NameConstraintViolated(_, _)   => "name-constraint-violated"
+        X509AlgorithmMismatch(_)           => "algorithm-mismatch"
+        X509SignatureInvalid(_)            => "signature-invalid"
+        X509NoVerifierForAlgorithm(_, _)   => "no-verifier"
+        X509CertRevoked(_, _)              => "cert-revoked"
+        X509CrlNotCurrent(_, _)            => "crl-not-current"
+        X509KeyPurposeNotPermitted(_, _)   => "key-purpose-not-permitted"
+        X509EmptyChain                     => "empty-chain"
+        X509EmptyTrustSet                  => "empty-trust-set"
+        X509PolicyUnusable(_)              => "policy-unusable"

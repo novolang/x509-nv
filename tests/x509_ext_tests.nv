@@ -1,9 +1,6 @@
 // tests/x509_ext_tests.nv — the extensions, and the one rule every
 // reader has to implement.
 //
-// RED ON PURPOSE, like every suite here: each assertion reaches
-// `not implemented: x509-nv.<module>.<fn>`.
-//
 // The numbering of the key-usage bits and the extension OIDs are RFC
 // 5280's, and the encodings asserted below are the ones every
 // certificate on the internet carries.  Where an encoding was not

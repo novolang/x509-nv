@@ -1,9 +1,6 @@
 // x509name — a distinguished name, and the one rule about comparing
 // two of them.
 //
-// Every body is a `todo()`.  The signatures are the design, and the
-// compiler checks them as claims; see the README for the stamp.
-//
 // WHAT A DISTINGUISHED NAME IS.  X.501 gives every entity in a
 // directory a path, and a certificate carries two of them: the issuer
 // and the subject.  The path is a sequence of RELATIVE distinguished
@@ -42,6 +39,10 @@
 // encoding rather than a re-encoding of parsed values, and a name
 // whose writer was not byte-for-byte canonical still matches itself.
 
+use asn1oid
+use asn1pkix
+use asn1read
+
 // The attribute types RFC 5280 section 4.1.2.4 requires a conforming
 // implementation to be prepared to receive, that `asn1oid` does not
 // already name.
@@ -62,22 +63,22 @@
 //     println(asn1oid.oid_text(x509name.oid_locality_name()))   // 2.5.4.7
 // ```
 pub fn oid_locality_name() -> AsnOid []
-    todo("x509-nv.x509name.oid_locality_name")
+    asn1oid.oid([2, 5, 4, 7])
 
 // `2.5.4.8` — `id-at-stateOrProvinceName`, `ST=`.
 pub fn oid_state_or_province_name() -> AsnOid []
-    todo("x509-nv.x509name.oid_state_or_province_name")
+    asn1oid.oid([2, 5, 4, 8])
 
 // `2.5.4.5` — `id-at-serialNumber`.  The serial number of the ENTITY,
 // which is not the certificate's serial number and is a different
 // field entirely.
 pub fn oid_serial_number() -> AsnOid []
-    todo("x509-nv.x509name.oid_serial_number")
+    asn1oid.oid([2, 5, 4, 5])
 
 // `2.5.4.46` — `id-at-dnQualifier`.  A disambiguator a registrar adds
 // when two entities would otherwise have the same name.
 pub fn oid_dn_qualifier() -> AsnOid []
-    todo("x509-nv.x509name.oid_dn_qualifier")
+    asn1oid.oid([2, 5, 4, 46])
 
 // `0.9.2342.19200300.100.1.25` — `domainComponent`, `DC=`.
 //
@@ -87,7 +88,7 @@ pub fn oid_dn_qualifier() -> AsnOid []
 // bound, and is therefore the one an OID decoder without a cap on the
 // first arc reads wrongly.
 pub fn oid_domain_component() -> AsnOid []
-    todo("x509-nv.x509name.oid_domain_component")
+    asn1oid.oid([0, 9, 2342, 19200300, 100, 1, 25])
 
 // `1.2.840.113549.1.9.1` — `emailAddress`, the PKCS #9 attribute.
 //
@@ -96,7 +97,7 @@ pub fn oid_domain_component() -> AsnOid []
 // named here because certificates that carry it exist and a reader
 // that could not name the attribute would print a dotted OID.
 pub fn oid_email_address() -> AsnOid []
-    todo("x509-nv.x509name.oid_email_address")
+    asn1oid.oid([1, 2, 840, 113549, 1, 9, 1])
 
 // The RFC 4514 section 3 short name for an attribute type — `"CN"`,
 // `"L"`, `"ST"`, `"O"`, `"OU"`, `"C"`, `"STREET"`, `"DC"`, `"UID"` —
@@ -104,9 +105,8 @@ pub fn oid_email_address() -> AsnOid []
 //
 // `""` rather than the dotted text, so that a caller can tell "this is
 // the common name" from "this is 1.2.3.4" and choose what to print.
-// `to_rfc4514` writes the dotted form with a `#`-prefixed hex value
-// for the types that have no short name, which is what RFC 4514
-// section 2.4 requires.
+// `to_rfc4514` writes the dotted form for a type the table does not
+// hold.
 //
 // ```novo
 // use asn1oid
@@ -116,7 +116,25 @@ pub fn oid_email_address() -> AsnOid []
 //     println(x509name.attribute_short_name(asn1oid.oid_common_name()))   // CN
 // ```
 pub fn attribute_short_name(o: AsnOid) -> Str []
-    todo("x509-nv.x509name.attribute_short_name")
+    if asn1oid.equals(o, asn1oid.oid_common_name())
+        return "CN"
+    if asn1oid.equals(o, asn1oid.oid_country_name())
+        return "C"
+    if asn1oid.equals(o, oid_locality_name())
+        return "L"
+    if asn1oid.equals(o, oid_state_or_province_name())
+        return "ST"
+    if asn1oid.equals(o, asn1oid.oid_organization_name())
+        return "O"
+    if asn1oid.equals(o, asn1oid.oid_organizational_unit_name())
+        return "OU"
+    if asn1oid.equals(o, asn1oid.oid([2, 5, 4, 9]))
+        return "STREET"
+    if asn1oid.equals(o, oid_domain_component())
+        return "DC"
+    if asn1oid.equals(o, asn1oid.oid([0, 9, 2342, 19200300, 100, 1, 1]))
+        return "UID"
+    ""
 
 // Every attribute of the name, flattened out of its relative names, in
 // the order they were encoded.
@@ -124,7 +142,11 @@ pub fn attribute_short_name(o: AsnOid) -> Str []
 // The order is the encoding's, outermost relative name first, which is
 // the reverse of the order RFC 4514 prints them in.
 pub fn attributes(n: AsnName) -> [AsnAttribute] []
-    todo("x509-nv.x509name.attributes")
+    var out: [AsnAttribute] = []
+    for rdn in n.rdns
+        for a in rdn.attributes
+            list.push(out, a)
+    out
 
 // Every value of every attribute with this type, in encoding order.
 //
@@ -143,7 +165,12 @@ pub fn attributes(n: AsnName) -> [AsnAttribute] []
 //     println("${list.len(ous)}")
 // ```
 pub fn attribute_values(n: AsnName, o: AsnOid) -> [Str] []
-    todo("x509-nv.x509name.attribute_values")
+    var out: [Str] = []
+    for rdn in n.rdns
+        for a in rdn.attributes
+            if asn1oid.equals(a.oid, o)
+                list.push(out, a.value)
+    out
 
 // The first common name in the name, or `None`.
 //
@@ -154,7 +181,10 @@ pub fn attribute_values(n: AsnName, o: AsnOid) -> [Str] []
 // This is for a log line, a certificate viewer and an operator asking
 // which certificate they are holding.
 pub fn common_name(n: AsnName) -> ?Str []
-    todo("x509-nv.x509name.common_name")
+    let all = attribute_values(n, asn1oid.oid_common_name())
+    if list.len(all) == 0
+        return None
+    Some(all[0])
 
 // How many relative distinguished names the name holds.
 //
@@ -162,15 +192,15 @@ pub fn common_name(n: AsnName) -> ?Str []
 // subject only when the certificate carries a critical subject
 // alternative name extension.
 pub fn rdn_count(n: AsnName) -> Int []
-    todo("x509-nv.x509name.rdn_count")
+    list.len(n.rdns)
 
 // Whether the name holds no relative distinguished names at all.
 //
 // An empty ISSUER is never conforming.  An empty SUBJECT is, in the
-// one case above, and `x509path.validate` checks the pair rather than
-// letting a caller discover it.
+// one case above, and `x509cert.check_conformance` checks the pair
+// rather than letting a caller discover it.
 pub fn is_empty(n: AsnName) -> Bool []
-    todo("x509-nv.x509name.is_empty")
+    list.len(n.rdns) == 0
 
 // The name as RFC 4514 text: `CN=example.com,O=Acme Ltd,C=GB`, the
 // outermost relative name LAST.
@@ -179,13 +209,43 @@ pub fn is_empty(n: AsnName) -> Bool []
 // specific attribute is written first.  A value is escaped by section
 // 2.4: a leading `#` or space, a trailing space, and every `,`, `+`,
 // `"`, `\`, `<`, `>` and `;` inside it take a backslash.  An attribute
-// type with no short name is written as its dotted OID with the
-// value's DER in hex after a `#`.
+// type with no short name is written as its dotted OID.  The other
+// form section 2.4 gives — a `#` and the value's DER in hex — is for a
+// value whose type is not a string, and `AsnAttribute.value` is a
+// `Str`: no such value reaches here.
 //
 // **For a person, and not for a comparison.**
 // `issuer_matches_subject` is the comparison.
 pub fn to_rfc4514(n: AsnName) -> Str []
-    todo("x509-nv.x509name.to_rfc4514")
+    var parts: [Str] = []
+    for i in 0..list.len(n.rdns)
+        let rdn = n.rdns[list.len(n.rdns) - 1 - i]
+        list.push(parts, rdn_text(rdn))
+    list.join(parts, ",")
+
+// One relative distinguished name as RFC 4514 text: its attributes in
+// encoding order, joined by `+`.
+fn rdn_text(rdn: AsnRdn) -> Str []
+    var pieces: [Str] = []
+    for a in rdn.attributes
+        list.push(pieces, attribute_text(a))
+    list.join(pieces, "+")
+
+// One attribute as RFC 4514 text: the short name when it has one, the
+// dotted OID when it does not, then `=` and the value escaped by
+// section 2.4.
+//
+// The `#`-prefixed hexadecimal form section 2.4 also gives is for a
+// value whose type is not a string; `AsnAttribute.value` is a `Str`,
+// because `asn1pkix.name_at` reads every attribute value as a string,
+// so there is none here.
+fn attribute_text(a: AsnAttribute) -> Str []
+    let short = attribute_short_name(a.oid)
+    let key = if short == ""
+        asn1oid.oid_text(a.oid)
+    else
+        short
+    "${key}=${escape_rfc4514(a.value)}"
 
 // One attribute value escaped by RFC 4514 section 2.4.
 //
@@ -200,14 +260,23 @@ pub fn to_rfc4514(n: AsnName) -> Str []
 //     println(x509name.escape_rfc4514("Acme, Ltd"))   // Acme\, Ltd
 // ```
 pub fn escape_rfc4514(value: Str) -> Str []
-    todo("x509-nv.x509name.escape_rfc4514")
+    var out = ""
+    let n = str.len(value)
+    for i in 0..n
+        let b = str.byte_at_or(value, i, 0)
+        let special = b == '"' or b == '+' or b == ',' or b == ';' or b == '<' or b == '>' or b == 92
+        let edge = i == 0 and (b == '#' or b == ' ') or i == n - 1 and b == ' '
+        if special or edge
+            out = out + "\\"
+        out = out + str.slice(value, i, i + 1)
+    out
 
 // The span the whole name occupies in the bytes it was read from.
 //
 // The bytes a comparison reads.  Published so that a caller holding a
 // name can hash it, index it or store it without re-encoding.
 pub fn name_span(n: AsnName) -> AsnSpan []
-    todo("x509-nv.x509name.name_span")
+    n.span
 
 // The name's DER, copied out of the bytes it was read from.
 //
@@ -215,7 +284,7 @@ pub fn name_span(n: AsnName) -> AsnSpan []
 // can see where the copy happens.  A trust store keyed by issuer name
 // holds these.
 pub fn name_der(src: Bytes, n: AsnName) -> Bytes []
-    todo("x509-nv.x509name.name_der")
+    asn1read.span_bytes(src, n.span)
 
 // Whether this issuer name and this subject name have the same
 // encoding.
@@ -244,4 +313,4 @@ pub fn name_der(src: Bytes, n: AsnName) -> Bytes []
 // ```
 pub fn issuer_matches_subject(issuer_src: Bytes, issuer: AsnName, subject_src: Bytes,
                               subject: AsnName) -> Bool []
-    todo("x509-nv.x509name.issuer_matches_subject")
+    asn1pkix.names_encode_equal(issuer_src, issuer, subject_src, subject)

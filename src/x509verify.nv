@@ -1,8 +1,5 @@
 // x509verify — the signature check, supplied by the caller.
 //
-// Every body is a `todo()`.  The signatures are the design, and the
-// compiler checks them as claims; see the README for the stamp.
-//
 // THIS PACKAGE NEVER DOES THE ARITHMETIC.  It reads a certificate,
 // finds the exact bytes a signature covers, finds the algorithm
 // identifier and the issuer's public key — and then asks somebody
@@ -50,6 +47,10 @@
 // place in this package where a declared row wants to widen.
 
 use std.bytes
+use asn1oid
+use x509cert
+use x509crl
+use x509csr
 
 // What a verifier answers about one signature.
 //
@@ -117,7 +118,18 @@ pub struct X509Verifier
 // ```
 pub fn verifier(name: Str, supports: fn(AsnOid) -> Bool [],
                 verify: fn(AsnAlgorithmId, AsnSubjectPublicKeyInfo, Bytes, Bytes) -> X509VerifyOutcome []) -> X509Verifier []
-    todo("x509-nv.x509verify.verifier")
+    X509Verifier { name: name, supports: supports, verify: verify }
+
+// Whether this verifier implements nothing.  The answer the empty
+// verifier's `supports` gives.
+fn nothing_supported(o: AsnOid) -> Bool []
+    false
+
+// The check the empty verifier makes: none, said in the algorithm's own
+// name so a report can print which signature went unchecked.
+fn nothing_checked(a: AsnAlgorithmId, k: AsnSubjectPublicKeyInfo, message: Bytes,
+                   signature: Bytes) -> X509VerifyOutcome []
+    X509SignatureUncheckable(algorithm: algorithm_name(a))
 
 // The verifier that implements nothing.
 //
@@ -128,7 +140,26 @@ pub fn verifier(name: Str, supports: fn(AsnOid) -> Bool [],
 // has every index in `X509Path.unchecked`, and a policy that requires
 // checked signatures refuses it — visibly, by name.
 pub fn no_verifier() -> X509Verifier []
-    todo("x509-nv.x509verify.no_verifier")
+    X509Verifier { name: "none", supports: nothing_supported, verify: nothing_checked }
+
+// The check `combined` makes: the first verifier that supports the
+// algorithm, and the second when neither does.
+//
+// A named function rather than the same `if` written inside the
+// `X509Verifier` literal, and the literal's lambda keeps its body on
+// the `=>` line: a lambda body written on its own line inside a struct
+// literal makes `novo fmt` refuse the whole file with an internal
+// compiler error — filed as
+// `tooling/novo-fmt-refuses-a-file-whose-struct-literal-carries-a-multi-line-lambda`.
+// This shape is the workaround; it goes back into the literal when
+// that filing closes.
+fn first_that_supports(a: X509Verifier, b: X509Verifier, alg: AsnAlgorithmId,
+                       key: AsnSubjectPublicKeyInfo, message: Bytes,
+                       signature: Bytes) -> X509VerifyOutcome []
+    if supports(a, alg.algorithm)
+        verify_signature(a, alg, key, message, signature)
+    else
+        verify_signature(b, alg, key, message, signature)
 
 // One verifier that tries the first and falls back to the second.
 //
@@ -139,7 +170,9 @@ pub fn no_verifier() -> X509Verifier []
 //
 // The name is `"a+b"`, so a report says which pair was in play.
 pub fn combined(a: X509Verifier, b: X509Verifier) -> X509Verifier []
-    todo("x509-nv.x509verify.combined")
+    X509Verifier { name: "${a.name}+${b.name}",
+                   supports: o => supports(a, o) or supports(b, o),
+                   verify: (alg, key, message, signature) => first_that_supports(a, b, alg, key, message, signature) }
 
 // Whether this verifier implements the algorithm this OID names.
 //
@@ -148,11 +181,11 @@ pub fn combined(a: X509Verifier, b: X509Verifier) -> X509Verifier []
 // a signature from — which is a configuration mistake worth finding
 // then rather than at the first refused connection.
 pub fn supports(v: X509Verifier, o: AsnOid) -> Bool []
-    todo("x509-nv.x509verify.supports")
+    v.supports(o)
 
 // This verifier's name.
 pub fn verifier_name(v: X509Verifier) -> Str []
-    todo("x509-nv.x509verify.verifier_name")
+    v.name
 
 // Check one signature, over bytes the caller already has.
 //
@@ -160,7 +193,7 @@ pub fn verifier_name(v: X509Verifier) -> Str []
 // not parse.
 pub fn verify_signature(v: X509Verifier, alg: AsnAlgorithmId, key: AsnSubjectPublicKeyInfo,
                         message: Bytes, signature: Bytes) -> X509VerifyOutcome []
-    todo("x509-nv.x509verify.verify_signature")
+    v.verify(alg, key, message, signature)
 
 // Check a certificate's signature against its issuer's public key.
 //
@@ -194,7 +227,11 @@ pub fn verify_signature(v: X509Verifier, alg: AsnAlgorithmId, key: AsnSubjectPub
 // ```
 pub fn verify_certificate(v: X509Verifier, issuer_key: AsnSubjectPublicKeyInfo, src: Bytes,
                           c: X509Cert) -> Result<X509VerifyOutcome, X509Error> []
-    todo("x509-nv.x509verify.verify_certificate")
+    if not x509cert.algorithms_agree(c)
+        return Err(X509AlgorithmMismatch(index: 0))
+    let message = x509cert.tbs_bytes(src, c)
+    let signature = x509cert.signature_bytes(c)!
+    Ok(verify_signature(v, c.outer_algorithm, issuer_key, message, signature))
 
 // Check a revocation list's signature against its issuer's public key.
 //
@@ -203,7 +240,9 @@ pub fn verify_certificate(v: X509Verifier, issuer_key: AsnSubjectPublicKeyInfo, 
 // revocation answer from whoever served the file.
 pub fn verify_crl(v: X509Verifier, issuer_key: AsnSubjectPublicKeyInfo, src: Bytes,
                   l: X509Crl) -> Result<X509VerifyOutcome, X509Error> []
-    todo("x509-nv.x509verify.verify_crl")
+    let message = x509crl.tbs_bytes(src, l)
+    let signature = x509crl.signature_bytes(l)!
+    Ok(verify_signature(v, l.outer_algorithm, issuer_key, message, signature))
 
 // Check a certification request's signature against its OWN public
 // key.
@@ -214,7 +253,10 @@ pub fn verify_crl(v: X509Verifier, issuer_key: AsnSubjectPublicKeyInfo, src: Byt
 // fewer argument than the other two.
 pub fn verify_csr(v: X509Verifier, src: Bytes,
                   r: X509Csr) -> Result<X509VerifyOutcome, X509Error> []
-    todo("x509-nv.x509verify.verify_csr")
+    let message = x509csr.info_bytes(src, r)
+    let signature = x509csr.signature_bytes(r)!
+    Ok(verify_signature(v, r.signature_algorithm, x509csr.public_key_of(r), message,
+                        signature))
 
 // Whether a certificate is signed by its own subject's key.
 //
@@ -225,7 +267,7 @@ pub fn verify_csr(v: X509Verifier, src: Bytes,
 // needs no verifier; this one asks the key question and does.
 pub fn is_self_signed(v: X509Verifier, src: Bytes,
                       c: X509Cert) -> Result<X509VerifyOutcome, X509Error> []
-    todo("x509-nv.x509verify.is_self_signed")
+    verify_certificate(v, x509cert.public_key_of(c), src, c)
 
 // Whether an outcome says the signature verified.
 //
@@ -242,19 +284,26 @@ pub fn is_self_signed(v: X509Verifier, src: Bytes,
 //     println("${x509verify.outcome_is_good(o)}")   // false
 // ```
 pub fn outcome_is_good(o: X509VerifyOutcome) -> Bool []
-    todo("x509-nv.x509verify.outcome_is_good")
+    match o
+        X509SignatureGood => true
+        _                 => false
 
 // Whether an outcome says nothing was checked.
 //
 // True for `X509SignatureUncheckable` alone.  A report that lists what
 // it could not speak for branches on this one.
 pub fn outcome_is_uncheckable(o: X509VerifyOutcome) -> Bool []
-    todo("x509-nv.x509verify.outcome_is_uncheckable")
+    match o
+        X509SignatureUncheckable(_) => true
+        _                           => false
 
 // The outcome as a short stable token: `"good"`, `"bad"`,
 // `"uncheckable"`.
 pub fn outcome_code(o: X509VerifyOutcome) -> Str []
-    todo("x509-nv.x509verify.outcome_code")
+    match o
+        X509SignatureGood           => "good"
+        X509SignatureBad            => "bad"
+        X509SignatureUncheckable(_) => "uncheckable"
 
 // The name an algorithm identifier is known by — `"ecdsa-with-SHA256"`,
 // `"Ed25519"`, `"sha256WithRSAEncryption"` — or its dotted OID for one
@@ -275,7 +324,30 @@ pub fn outcome_code(o: X509VerifyOutcome) -> Str []
 //     println(x509verify.algorithm_name(a))   // sha256WithRSAEncryption
 // ```
 pub fn algorithm_name(a: AsnAlgorithmId) -> Str []
-    todo("x509-nv.x509verify.algorithm_name")
+    let o = a.algorithm
+    if asn1oid.equals(o, asn1oid.oid_ecdsa_with_sha256())
+        return "ecdsa-with-SHA256"
+    if asn1oid.equals(o, oid_ecdsa_with_sha384())
+        return "ecdsa-with-SHA384"
+    if asn1oid.equals(o, oid_ecdsa_with_sha512())
+        return "ecdsa-with-SHA512"
+    if asn1oid.equals(o, asn1oid.oid_ed25519())
+        return "Ed25519"
+    if asn1oid.equals(o, asn1oid.oid_sha256_with_rsa())
+        return "sha256WithRSAEncryption"
+    if asn1oid.equals(o, oid_sha1_with_rsa())
+        return "sha1WithRSAEncryption"
+    if asn1oid.equals(o, oid_sha384_with_rsa())
+        return "sha384WithRSAEncryption"
+    if asn1oid.equals(o, oid_sha512_with_rsa())
+        return "sha512WithRSAEncryption"
+    if asn1oid.equals(o, oid_rsassa_pss())
+        return "RSASSA-PSS"
+    if asn1oid.equals(o, asn1oid.oid_rsa_encryption())
+        return "rsaEncryption"
+    if asn1oid.equals(o, asn1oid.oid_ec_public_key())
+        return "id-ecPublicKey"
+    asn1oid.oid_text(o)
 
 // Whether a signature algorithm is one of the RSA family.
 //
@@ -285,7 +357,13 @@ pub fn algorithm_name(a: AsnAlgorithmId) -> Str []
 // to say so in its own words — "this certificate is RSA-signed and we
 // have no RSA" — asks this rather than comparing five OIDs by hand.
 pub fn is_rsa_algorithm(a: AsnAlgorithmId) -> Bool []
-    todo("x509-nv.x509verify.is_rsa_algorithm")
+    let o = a.algorithm
+    asn1oid.equals(o, asn1oid.oid_rsa_encryption())
+        or asn1oid.equals(o, asn1oid.oid_sha256_with_rsa())
+        or asn1oid.equals(o, oid_sha1_with_rsa())
+        or asn1oid.equals(o, oid_sha384_with_rsa())
+        or asn1oid.equals(o, oid_sha512_with_rsa())
+        or asn1oid.equals(o, oid_rsassa_pss())
 
 // ── the signature algorithm OIDs `asn1oid` does not name ────────────
 
@@ -295,29 +373,29 @@ pub fn is_rsa_algorithm(a: AsnAlgorithmId) -> Bool []
 // `oid_sha256_with_rsa`; the rest of the family is here, so that one
 // OID still has one home.
 pub fn oid_ecdsa_with_sha384() -> AsnOid []
-    todo("x509-nv.x509verify.oid_ecdsa_with_sha384")
+    asn1oid.oid([1, 2, 840, 10045, 4, 3, 3])
 
 // `1.2.840.10045.4.3.4` — `ecdsa-with-SHA512`.
 pub fn oid_ecdsa_with_sha512() -> AsnOid []
-    todo("x509-nv.x509verify.oid_ecdsa_with_sha512")
+    asn1oid.oid([1, 2, 840, 10045, 4, 3, 4])
 
 // `1.2.840.113549.1.1.5` — `sha1WithRSAEncryption`.  RSA, and SHA-1:
 // no verifier here will check it and no caller should accept it.  It
 // is named so a report can say which of the two problems it has.
 pub fn oid_sha1_with_rsa() -> AsnOid []
-    todo("x509-nv.x509verify.oid_sha1_with_rsa")
+    asn1oid.oid([1, 2, 840, 113549, 1, 1, 5])
 
 // `1.2.840.113549.1.1.12` — `sha384WithRSAEncryption`.  RSA.
 pub fn oid_sha384_with_rsa() -> AsnOid []
-    todo("x509-nv.x509verify.oid_sha384_with_rsa")
+    asn1oid.oid([1, 2, 840, 113549, 1, 1, 12])
 
 // `1.2.840.113549.1.1.13` — `sha512WithRSAEncryption`.  RSA.
 pub fn oid_sha512_with_rsa() -> AsnOid []
-    todo("x509-nv.x509verify.oid_sha512_with_rsa")
+    asn1oid.oid([1, 2, 840, 113549, 1, 1, 13])
 
 // `1.2.840.113549.1.1.10` — `id-RSASSA-PSS`.  RSA, with the hash, the
 // mask generation function and the salt length in the parameters
 // rather than in the OID — so a verifier for it must read the
 // parameters, which is why the parameters are carried whole.
 pub fn oid_rsassa_pss() -> AsnOid []
-    todo("x509-nv.x509verify.oid_rsassa_pss")
+    asn1oid.oid([1, 2, 840, 113549, 1, 1, 10])

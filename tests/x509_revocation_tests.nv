@@ -1,9 +1,6 @@
 // tests/x509_revocation_tests.nv — revocation lists and certification
 // requests.
 //
-// RED ON PURPOSE, like every suite here: each assertion reaches
-// `not implemented: x509-nv.<module>.<fn>`.
-//
 // The fact this suite pins hardest is that a revocation lookup is a
 // PURE FUNCTION of a list and a serial number.  No clock, no network,
 // no file — so a replay of a request log answers what it answered the

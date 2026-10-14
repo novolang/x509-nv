@@ -12,12 +12,6 @@ package reads all three and validates a chain, on top of
 [asn1-nv](https://novo-lang.org/packages/asn1-nv), which reads the DER
 underneath.
 
-**Status: NOT IMPLEMENTED — interface only.** Every function is declared
-with its full signature, but every body is a `todo()` that panics when
-called. The package is published so its design can be reviewed and
-depended on before it is implemented. Version 0.1.0 will be the first
-working release.
-
 Two gaps are worth knowing before you read further.
 
 **Nothing here verifies a signature.** The arithmetic is supplied by the
@@ -129,10 +123,7 @@ fn main() [io]
                 Ok(Some(names)) => println("${list.len(x509ext.dns_names(names))}")
 ```
 
-Build and test with `novo pkg build` and `novo test`. Today `novo test`
-fails on purpose: every test reaches a `not implemented:
-x509-nv.<module>.<fn>` panic. The tests are the specification the
-implementation will have to satisfy.
+Build and test with `novo pkg build` and `novo test`.
 
 ## What the package contains
 
@@ -304,8 +295,10 @@ does carry a device claim.
   is where DER is written.
 - **The policy processing of RFC 5280 section 6.1** — the valid-policy
   tree, policy mapping, and the inhibit and require counters.
-  `certificatePolicies`, `policyMappings`, `policyConstraints` and
-  `inhibitAnyPolicy` are read and reported; the tree is not built.
+  `certificatePolicies` is parsed, and `policyMappings`,
+  `policyConstraints` and `inhibitAnyPolicy` are named as known OIDs so
+  that a critical one is not an unknown-critical refusal; the tree is
+  not built and none of the three is decoded.
   `X509Path.policies` lists what each certificate asserted.
 - **Delta revocation lists, applied.** `x509crl.delta_crl_indicator`
   says a list is a delta and names the base it applies to. Combining
@@ -340,8 +333,15 @@ does carry a device claim.
 
 ## Tests
 
-The suites are written against the signatures and are red until the
-bodies land. They assert what the implementation will have to satisfy.
+The five suites the interface release landed are its oracle. Two
+suites were added with the bodies: `x509_api_tests.nv` calls the
+public surface on documents that really answer — a certificate whose
+entry extensions, subtree rules and unique identifiers are there to be
+read, rather than only documents that must be refused — and
+`x509_edge_tests.nv` adds the boundaries the oracle leaves open, and
+the four the package is judged on: a truncated certificate at three
+nesting depths, both ends of a validity window, a non-canonical
+encoding, and a name comparison where the case differs.
 
 | Suite | What it asserts |
 | --- | --- |
@@ -350,6 +350,8 @@ bodies land. They assert what the implementation will have to satisfy.
 | `x509_path_tests.nv` | A signature nobody can check is an answer and not a failure; an RSA-signed certificate reports that nothing checked it; the verifier is a value and two combine; the policy narrows one check at a time; a chain that breaks names the certificate that broke it; a wildcard matches one label. |
 | `x509_revocation_tests.nv` | The revocation lookup is a pure function of a list and a serial; a serial is unique only under one issuer; the reason numbers including the unused 7; a request is self-signed and its extensions are a request. |
 | `x509_cover_tests.nv` | Every remaining public function, one case each: an absent extension is `Ok(None)`, a decode cause survives whole, and every signed structure goes through the same verifier. |
+| `x509_api_tests.nv` | The public surface against documents that answer: every `fn main` block in the doc comments, called for real; a CRL entry's reason and invalidity date, which a reader that misreads the entry's untagged extensions drops; the subtree comparison beside the encoding comparison; the nine key-usage bits; the two unique identifiers read as BIT STRINGs; the verifier's three arms; and both window ends with the instant supplied. |
+| `x509_edge_tests.nv` | The boundaries the oracle leaves open: a truncated certificate at three nesting depths, both ends of a validity window, a non-canonical encoding accepted or refused by name, and a name comparison where the case differs. |
 
 Where a byte vector appears it is one taken from RFC 5280's own ASN.1
 module or from the encoding rules of ITU-T X.690 — the key usage
@@ -357,39 +359,6 @@ module or from the encoding rules of ITU-T X.690 — the key usage
 server carries, and the `2.5.29.*` and `1.3.6.1.5.5.7.3.*` identifiers.
 Where no vector was certain the assertion is about the structure and the
 rule, and the comment names the section it comes from.
-
-## Implementation status
-
-| Item | Implemented |
-| --- | --- |
-| The version, serial-length, key-usage-bit and chain-length constants | yes (they are constants) |
-| `x509cert.X509Cert`, `x509ext.X509BasicConstraints`, `.X509KeyUsage`, `.X509GeneralName`, `.X509AuthorityKeyId`, `.X509GeneralSubtree`, `.X509NameConstraints`, `.X509DistributionPoint`, `.X509PolicyInfo`, `.X509PolicyQualifier` | the types are declared |
-| `x509crl.X509Crl`, `.X509RevokedCert`, `.X509CrlReason`, `x509csr.X509Csr`, `.X509CsrAttribute` | the types are declared |
-| `x509verify.X509Verifier`, `.X509VerifyOutcome`, `x509path.X509Anchor`, `.X509TrustSet`, `.X509PathPolicy`, `.X509Path`, `x509err.X509Error` | the types are declared |
-| `x509cert.parse`, `.parse_at`, `.parse_all`, `.tbs_bytes`, `.tbs_span`, `.der_bytes`, `.signature_bytes`, `.serial_hex` | no |
-| `x509cert.is_valid_at`, `.check_validity_at`, `.is_self_issued`, `.algorithms_agree`, `.check_conformance` | no |
-| `x509cert.public_key_algorithm`, `.public_key_of`, `.issuer_of`, `.subject_of`, `.extensions_of`, `.has_extension`, `.version_of` | no |
-| `x509ext`'s seventeen OID functions and `.known_oids` | no |
-| `x509ext.find`, `.is_critical`, `.unknown_critical`, `.check_unknown_critical`, `.extension_value` | no |
-| `x509ext.basic_constraints`, `.is_ca`, `.key_usage`, `.key_usage_of_bits`, `.key_usage_bit`, `.key_usage_name` | no |
-| `x509ext.extended_key_usage`, `.has_key_purpose`, `.subject_alt_name`, `.issuer_alt_name`, `.dns_names`, `.ip_addresses`, `.general_name_text` | no |
-| `x509ext.subject_key_identifier`, `.authority_key_identifier`, `.name_constraints`, `.subtree_contains`, `.constraints_permit` | no |
-| `x509ext.crl_distribution_points`, `.distribution_point_uris`, `.certificate_policies`, `.asserts_policy` | no |
-| `x509crl.parse`, `.tbs_bytes`, `.signature_bytes`, `.is_revoked`, `.is_revoked_by`, `.entry_for`, `.check_revoked`, `.entries_of`, `.entry_count` | no |
-| `x509crl.revocation_reason`, `.reason_number`, `.reason_named`, `.reason_name`, `.invalidity_date`, `.certificate_issuer` | no |
-| `x509crl.crl_number`, `.delta_crl_indicator`, `.is_current_at`, `.check_current_at`, `.extensions_of`, `.issuer_of`, and its six OID functions | no |
-| `x509csr.parse`, `.info_bytes`, `.info_span`, `.signature_bytes`, `.subject_of`, `.public_key_of`, `.attributes_of`, `.attribute_by_oid` | no |
-| `x509csr.requested_extensions`, `.requested_dns_names`, `.challenge_password`, `.check_conformance`, `.oid_extension_request`, `.oid_challenge_password` | no |
-| `x509verify.verifier`, `.no_verifier`, `.combined`, `.supports`, `.verifier_name`, `.verify_signature` | no |
-| `x509verify.verify_certificate`, `.verify_crl`, `.verify_csr`, `.is_self_signed` | no |
-| `x509verify.outcome_is_good`, `.outcome_is_uncheckable`, `.outcome_code`, `.algorithm_name`, `.is_rsa_algorithm`, and its six OID functions | no |
-| `x509path.anchor`, `.trust_set`, `.empty_trust_set`, `.anchors_of`, `.anchor_count`, `.with_anchor`, `.find_anchor` | no |
-| `x509path.strict`, `.permissive`, `.with_max_chain_length`, `.allowing_unchecked_signatures`, `.knowing_extensions`, `.requiring_key_purpose`, `.without_validity_check`, `.without_name_constraints`, `.check_policy` | no |
-| `x509path.validate`, `.validate_der`, `.build_chain`, `.check_chain_order`, `.check_certificate` | no |
-| `x509path.leaf_of`, `.anchor_of`, `.path_length`, `.unchecked_of`, `.is_fully_checked`, `.policies_of`, `.matches_hostname`, `.names_permitted` | no |
-| `x509name`'s six OID functions, `.attribute_short_name`, `.attributes`, `.attribute_values`, `.common_name`, `.rdn_count`, `.is_empty` | no |
-| `x509name.to_rfc4514`, `.escape_rfc4514`, `.name_span`, `.name_der`, `.issuer_matches_subject` | no |
-| `x509err.is_malformed`, `.is_rule_failure`, `.is_validity_failure`, `.error_index`, `.error_offset`, `.decode_cause`, `.code`, `X509Error.message` | no |
 
 ## Licence
 

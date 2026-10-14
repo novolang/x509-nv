@@ -1,9 +1,6 @@
 // tests/x509_cover_tests.nv — the rest of the public surface, one case
 // each.
 //
-// RED ON PURPOSE, like every suite here: each assertion reaches
-// `not implemented: x509-nv.<module>.<fn>`.
-//
 // The four suites beside this one assert the DESIGN — the bytes a
 // signature covers, the bit numbering, the pure lookup, the
 // caller-supplied verifier.  This one exists so that no public

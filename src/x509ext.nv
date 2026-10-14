@@ -1,8 +1,5 @@
 // x509ext — the extensions RFC 5280 defines, each as a typed value.
 //
-// Every body is a `todo()`.  The signatures are the design, and the
-// compiler checks them as claims; see the README for the stamp.
-//
 // WHAT AN EXTENSION IS.  RFC 5280 section 4.2 gives a version 3
 // certificate a list of extensions, each of them three things: an
 // OBJECT IDENTIFIER saying which extension it is, a BOOLEAN saying
@@ -50,6 +47,12 @@
 // rather than worked around.
 
 use std.bytes
+use asn1oid
+use asn1pkix
+use asn1read
+use asn1univ
+use x509err
+use x509name
 
 // ── the extension OIDs, by name ─────────────────────────────────────
 
@@ -66,83 +69,83 @@ use std.bytes
 //     // 2.5.29.14
 // ```
 pub fn oid_subject_key_identifier() -> AsnOid []
-    todo("x509-nv.x509ext.oid_subject_key_identifier")
+    asn1oid.oid([2, 5, 29, 14])
 
 // `2.5.29.35` — `id-ce-authorityKeyIdentifier`.  Names the key that
 // signed this certificate.  RFC 5280 section 4.2.1.1.
 pub fn oid_authority_key_identifier() -> AsnOid []
-    todo("x509-nv.x509ext.oid_authority_key_identifier")
+    asn1oid.oid([2, 5, 29, 35])
 
 // `2.5.29.18` — `id-ce-issuerAltName`.  RFC 5280 section 4.2.1.7.
 pub fn oid_issuer_alt_name() -> AsnOid []
-    todo("x509-nv.x509ext.oid_issuer_alt_name")
+    asn1oid.oid([2, 5, 29, 18])
 
 // `2.5.29.30` — `id-ce-nameConstraints`.  RFC 5280 section 4.2.1.10.
 // Appears only in a CA certificate, and MUST be critical there.
 pub fn oid_name_constraints() -> AsnOid []
-    todo("x509-nv.x509ext.oid_name_constraints")
+    asn1oid.oid([2, 5, 29, 30])
 
 // `2.5.29.31` — `id-ce-cRLDistributionPoints`.  Where the revocation
 // list for this certificate is published.  RFC 5280 section 4.2.1.13.
 pub fn oid_crl_distribution_points() -> AsnOid []
-    todo("x509-nv.x509ext.oid_crl_distribution_points")
+    asn1oid.oid([2, 5, 29, 31])
 
 // `2.5.29.32` — `id-ce-certificatePolicies`.  RFC 5280 section
 // 4.2.1.4.
 pub fn oid_certificate_policies() -> AsnOid []
-    todo("x509-nv.x509ext.oid_certificate_policies")
+    asn1oid.oid([2, 5, 29, 32])
 
 // `2.5.29.32.0` — `anyPolicy`.  The policy that means "any", and the
 // one a CA writes when it asserts no particular policy at all.
 pub fn oid_any_policy() -> AsnOid []
-    todo("x509-nv.x509ext.oid_any_policy")
+    asn1oid.oid([2, 5, 29, 32, 0])
 
 // `2.5.29.33` — `id-ce-policyMappings`.  RFC 5280 section 4.2.1.5.
 // Named so a critical one can be recognised; the mapping algorithm
 // itself is not implemented here and the README says so.
 pub fn oid_policy_mappings() -> AsnOid []
-    todo("x509-nv.x509ext.oid_policy_mappings")
+    asn1oid.oid([2, 5, 29, 33])
 
 // `2.5.29.36` — `id-ce-policyConstraints`.  RFC 5280 section 4.2.1.11.
 pub fn oid_policy_constraints() -> AsnOid []
-    todo("x509-nv.x509ext.oid_policy_constraints")
+    asn1oid.oid([2, 5, 29, 36])
 
 // `2.5.29.54` — `id-ce-inhibitAnyPolicy`.  RFC 5280 section 4.2.1.14.
 pub fn oid_inhibit_any_policy() -> AsnOid []
-    todo("x509-nv.x509ext.oid_inhibit_any_policy")
+    asn1oid.oid([2, 5, 29, 54])
 
 // `2.5.29.37.0` — `anyExtendedKeyUsage`.  A key usable for every
 // purpose, and the value `has_key_purpose` honours so that a caller
 // does not have to know the rule.
 pub fn oid_any_extended_key_usage() -> AsnOid []
-    todo("x509-nv.x509ext.oid_any_extended_key_usage")
+    asn1oid.oid([2, 5, 29, 37, 0])
 
 // `1.3.6.1.5.5.7.3.1` — `id-kp-serverAuth`.  The purpose a TLS server
 // certificate must carry.  RFC 5280 section 4.2.1.12.
 pub fn oid_kp_server_auth() -> AsnOid []
-    todo("x509-nv.x509ext.oid_kp_server_auth")
+    asn1oid.oid([1, 3, 6, 1, 5, 5, 7, 3, 1])
 
 // `1.3.6.1.5.5.7.3.2` — `id-kp-clientAuth`.
 pub fn oid_kp_client_auth() -> AsnOid []
-    todo("x509-nv.x509ext.oid_kp_client_auth")
+    asn1oid.oid([1, 3, 6, 1, 5, 5, 7, 3, 2])
 
 // `1.3.6.1.5.5.7.3.3` — `id-kp-codeSigning`.
 pub fn oid_kp_code_signing() -> AsnOid []
-    todo("x509-nv.x509ext.oid_kp_code_signing")
+    asn1oid.oid([1, 3, 6, 1, 5, 5, 7, 3, 3])
 
 // `1.3.6.1.5.5.7.3.4` — `id-kp-emailProtection`.
 pub fn oid_kp_email_protection() -> AsnOid []
-    todo("x509-nv.x509ext.oid_kp_email_protection")
+    asn1oid.oid([1, 3, 6, 1, 5, 5, 7, 3, 4])
 
 // `1.3.6.1.5.5.7.3.8` — `id-kp-timeStamping`.
 pub fn oid_kp_time_stamping() -> AsnOid []
-    todo("x509-nv.x509ext.oid_kp_time_stamping")
+    asn1oid.oid([1, 3, 6, 1, 5, 5, 7, 3, 8])
 
 // `1.3.6.1.5.5.7.3.9` — `id-kp-OCSPSigning`.  Named so that a reader
 // can recognise a responder's certificate; OCSP itself is not in this
 // package and the README says where it would go.
 pub fn oid_kp_ocsp_signing() -> AsnOid []
-    todo("x509-nv.x509ext.oid_kp_ocsp_signing")
+    asn1oid.oid([1, 3, 6, 1, 5, 5, 7, 3, 9])
 
 // Every extension OID this package reads, in one list.
 //
@@ -150,16 +153,21 @@ pub fn oid_kp_ocsp_signing() -> AsnOid []
 // a caller can see the set rather than infer it, and so a test can
 // assert that the set did not shrink between releases.
 pub fn known_oids() -> [AsnOid] []
-    todo("x509-nv.x509ext.known_oids")
+    [oid_subject_key_identifier(), oid_authority_key_identifier(),
+     oid_issuer_alt_name(), oid_name_constraints(), oid_crl_distribution_points(),
+     oid_certificate_policies(), oid_policy_mappings(), oid_policy_constraints(),
+     oid_inhibit_any_policy(), asn1oid.oid_basic_constraints(), asn1oid.oid_key_usage(),
+     asn1oid.oid_subject_alt_name(), asn1oid.oid_ext_key_usage()]
 
 // ── finding one ─────────────────────────────────────────────────────
 
 // The extension with this OID, or `None`.
 //
 // RFC 5280 section 4.2 forbids a certificate from carrying two
-// extensions with one OID, so the first match is the only match; a
-// document that breaks the rule is caught by
-// `x509cert.check_conformance` rather than silently half-read here.
+// extensions with one OID, so the first match is the only match.  A
+// document that breaks the rule is NOT refused here or by
+// `x509cert.check_conformance`: the second extension is never
+// answered, which the CHANGELOG's `### Known` names.
 //
 // ```novo
 // use asn1oid
@@ -171,14 +179,19 @@ pub fn known_oids() -> [AsnOid] []
 //         None    => println("absent")
 // ```
 pub fn find(exts: [AsnExtension], o: AsnOid) -> ?AsnExtension []
-    todo("x509-nv.x509ext.find")
+    for e in exts
+        if asn1oid.equals(e.oid, o)
+            return Some(e)
+    None
 
 // Whether the extension with this OID is present and marked critical.
 //
 // False when it is absent, which is the answer a caller wants: "is
 // this constraint being imposed on me".
 pub fn is_critical(exts: [AsnExtension], o: AsnOid) -> Bool []
-    todo("x509-nv.x509ext.is_critical")
+    match find(exts, o)
+        Some(e) => e.critical
+        None    => false
 
 // Every critical extension whose OID is neither in `known_oids` nor in
 // `also_known`.
@@ -188,7 +201,12 @@ pub fn is_critical(exts: [AsnExtension], o: AsnOid) -> Bool []
 // implements a private extension names it here and stops being
 // required to refuse it.
 pub fn unknown_critical(exts: [AsnExtension], also_known: [AsnOid]) -> [AsnExtension] []
-    todo("x509-nv.x509ext.unknown_critical")
+    let known = known_oids()
+    var out: [AsnExtension] = []
+    for e in exts
+        if e.critical and not list.contains(known, e.oid) and not list.contains(also_known, e.oid)
+            list.push(out, e)
+    out
 
 // The refusal an unknown critical extension produces, or `None` when
 // there is none.
@@ -208,7 +226,446 @@ pub fn unknown_critical(exts: [AsnExtension], also_known: [AsnOid]) -> [AsnExten
 // ```
 pub fn check_unknown_critical(exts: [AsnExtension], index: Int,
                               also_known: [AsnOid]) -> ?X509Error []
-    todo("x509-nv.x509ext.check_unknown_critical")
+    let unknown = unknown_critical(exts, also_known)
+    if list.len(unknown) == 0
+        return None
+    Some(X509UnknownCriticalExtension(index: index, oid: asn1oid.oid_text(unknown[0].oid)))
+
+// ── the parts the readers below share ──────────────────────────────
+
+// An asn1-nv refusal inside an extension's own value, as this
+// package's refusal about that extension.
+//
+// The OID travels into the refusal because that is what a reader of it
+// needs: which extension, out of the several a certificate carries, is
+// the one that did not parse.  The extension values arrive as copies
+// with no offset into the certificate they came from, so the byte in
+// the arm is 0 and the OID is what names the place.
+fn ext_der<T>(r: Result<T, AsnDecodeError>, oid: AsnOid) -> Result<T, X509Error> []
+    match r
+        Ok(v)  => Ok(v)
+        Err(_) => Err(X509BadExtensionValue(at: 0, oid: asn1oid.oid_text(oid)))
+
+// Refuse an extension value that is not exactly one DER document.
+//
+// A length inside an extension is a length an attacker wrote.  Every
+// reader below calls this first, so a value with bytes after the
+// structure is refused rather than half-read.
+fn one_value(v: Bytes, oid: AsnOid, limits: AsnLimits) -> Result<Unit, X509Error> []
+    match asn1read.read_document(v, limits)
+        Ok(_)  => Ok()
+        Err(_) => Err(X509BadExtensionValue(at: 0, oid: asn1oid.oid_text(oid)))
+
+// The children of the SEQUENCE at the top of an extension value.
+fn ext_sequence(v: Bytes, oid: AsnOid, limits: AsnLimits) -> Result<[AsnSpan], X509Error> []
+    one_value(v, oid, limits)!
+    ext_der(asn1univ.sequence_at(v, 0, limits), oid)
+
+// The BIT STRING at the top of an extension value.
+fn ext_bit_string(v: Bytes, oid: AsnOid, limits: AsnLimits) -> Result<AsnBitString, X509Error> []
+    one_value(v, oid, limits)!
+    ext_der(asn1univ.bit_string_at(v, 0, limits), oid)
+
+// Every GeneralName the children at `kids` hold.
+//
+// The caller passes the children rather than the offset because a
+// GeneralNames arrives two ways: as the whole extension value, where
+// the SEQUENCE tag was written, and as an implicitly tagged `[1]` or
+// `[2]` elsewhere, where it was not.
+fn names_of(src: Bytes, kids: [AsnSpan], oid: AsnOid,
+            limits: AsnLimits) -> Result<[X509GeneralName], X509Error> []
+    var out: [X509GeneralName] = []
+    for k in kids
+        list.push(out, name_at(src, k.off, oid, limits)!)
+    Ok(out)
+
+// One GeneralName at `off`.
+//
+// `iPAddress` is whatever number of octets is there and NOT four or
+// sixteen: a name constraint writes the address followed by a mask of
+// the same length, which is eight or thirty-two, and a reader that
+// insisted on an address size could not read the extension.
+fn name_at(src: Bytes, off: Int, oid: AsnOid,
+           limits: AsnLimits) -> Result<X509GeneralName, X509Error> []
+    let t = ext_der(asn1read.peek_tag_at(src, off, limits), oid)!
+    let whole = ext_der(asn1read.value_span_at(src, off, limits), oid)!
+    if t.class != AsnContext
+        return Err(X509BadExtensionValue(at: 0, oid: asn1oid.oid_text(oid)))
+    if t.number == 2
+        let c = ext_der(asn1read.implicit_at(src, off, 2, limits), oid)!
+        return Ok(X509DnsName(name: ia5_text(src, c, oid)!))
+    if t.number == 1
+        let c = ext_der(asn1read.implicit_at(src, off, 1, limits), oid)!
+        return Ok(X509EmailAddress(address: ia5_text(src, c, oid)!))
+    if t.number == 6
+        let c = ext_der(asn1read.implicit_at(src, off, 6, limits), oid)!
+        return Ok(X509Uri(uri: ia5_text(src, c, oid)!))
+    if t.number == 7
+        let c = ext_der(asn1read.implicit_at(src, off, 7, limits), oid)!
+        return Ok(X509IpAddress(octets: asn1read.span_bytes(src, c)))
+    if t.number == 8
+        let c = ext_der(asn1read.implicit_at(src, off, 8, limits), oid)!
+        return Ok(X509RegisteredId(
+            oid: ext_der(asn1oid.decode(asn1read.span_bytes(src, c)), oid)!))
+    if t.number == 4
+        // `directoryName [4] Name`: the tag is explicit, so its
+        // content is the Name SEQUENCE whole.
+        let c = ext_der(asn1read.expect_context_at(src, off, 4, limits), oid)!
+        return Ok(X509DirectoryName(name: ext_der(asn1pkix.name_at(src, c.off, limits), oid)!))
+    if t.number == 0
+        let kids = ext_der(asn1read.children_at(src, off, limits), oid)!
+        if list.len(kids) != 2
+            return Err(X509BadExtensionValue(at: 0, oid: asn1oid.oid_text(oid)))
+        let type_id = ext_der(asn1univ.oid_at(src, kids[0].off, limits), oid)!
+        // `value [0] EXPLICIT ANY`: explicit, so the content is one
+        // whole value and the span is that value whole.
+        ext_der(asn1read.explicit_at(src, kids[1].off, 0, limits), oid)!
+        let inner = ext_der(asn1read.expect_context_at(src, kids[1].off, 0, limits), oid)!
+        return Ok(X509OtherName(oid: type_id, value: asn1read.span_bytes(src, inner)))
+    if t.number == 3 or t.number == 5
+        return Ok(X509UnsupportedName(tag: t.number, value: asn1read.span_bytes(src, whole)))
+    Err(X509BadExtensionValue(at: 0, oid: asn1oid.oid_text(oid)))
+
+// An IA5String: seven-bit bytes and nothing else.
+//
+// The tag is implicit, so the content is here and the rule X.690
+// states for IA5String is applied by hand: a byte above 127 is not a
+// character the type can hold, and a reader that accepted one would
+// answer a string the writer never wrote.
+fn ia5_text(src: Bytes, c: AsnSpan, oid: AsnOid) -> Result<Str, X509Error> []
+    for i in c.off..c.off + c.len
+        if (bytes.byte_at(src, i) ?? 0) > 127
+            return Err(X509BadExtensionValue(at: 0, oid: asn1oid.oid_text(oid)))
+    Ok(bytes.to_str(asn1read.span_bytes(src, c)))
+
+// A BaseDistance at `off`: an INTEGER that is not negative, not
+// redundant and not longer than eight bytes.
+fn base_distance_at(src: Bytes, off: Int, number: Int, oid: AsnOid,
+                    limits: AsnLimits) -> Result<Int, X509Error> []
+    let c = ext_der(asn1read.implicit_at(src, off, number, limits), oid)!
+    let bad = X509BadExtensionValue(at: 0, oid: asn1oid.oid_text(oid))
+    if c.len == 0
+        return Err(bad)
+    let first = bytes.byte_at(src, c.off) ?? 0
+    if first >= 128 or c.len > 1 and first == 0 or c.len > 8
+        return Err(bad)
+    var v = 0
+    for i in c.off..c.off + c.len
+        v = v * 256 + (bytes.byte_at(src, i) ?? 0)
+    Ok(v)
+
+// The subtrees of a `[0] permittedSubtrees` or `[1] excludedSubtrees`.
+fn subtrees_at(src: Bytes, off: Int, oid: AsnOid,
+               limits: AsnLimits) -> Result<[X509GeneralSubtree], X509Error> []
+    var out: [X509GeneralSubtree] = []
+    for k in ext_der(asn1read.children_at(src, off, limits), oid)!
+        list.push(out, subtree_at(src, k.off, oid, limits)!)
+    Ok(out)
+
+// One GeneralSubtree, with `minimum` defaulting to 0 and `maximum` to
+// -1 for absent.
+fn subtree_at(src: Bytes, off: Int, oid: AsnOid,
+              limits: AsnLimits) -> Result<X509GeneralSubtree, X509Error> []
+    let kids = ext_der(asn1univ.sequence_at(src, off, limits), oid)!
+    if list.len(kids) == 0
+        return Err(X509BadExtensionValue(at: 0, oid: asn1oid.oid_text(oid)))
+    var minimum = 0
+    var maximum = -1
+    for k in kids[1:]
+        let t = ext_der(asn1read.peek_tag_at(src, k.off, limits), oid)!
+        if t.class != AsnContext
+            return Err(X509BadExtensionValue(at: 0, oid: asn1oid.oid_text(oid)))
+        if t.number == 0
+            minimum = base_distance_at(src, k.off, 0, oid, limits)!
+        else if t.number == 1
+            maximum = base_distance_at(src, k.off, 1, oid, limits)!
+        else
+            return Err(X509BadExtensionValue(at: 0, oid: asn1oid.oid_text(oid)))
+    Ok(X509GeneralSubtree { base: name_at(src, kids[0].off, oid, limits)!,
+                            minimum: minimum, maximum: maximum })
+
+// One DistributionPoint.
+fn point_at(src: Bytes, off: Int, oid: AsnOid,
+            limits: AsnLimits) -> Result<X509DistributionPoint, X509Error> []
+    let kids = ext_der(asn1univ.sequence_at(src, off, limits), oid)!
+    var full: [X509GeneralName] = []
+    var relative: [AsnAttribute] = []
+    var issuer: [X509GeneralName] = []
+    var reasons = -1
+    for k in kids
+        let t = ext_der(asn1read.peek_tag_at(src, k.off, limits), oid)!
+        if t.class != AsnContext
+            return Err(X509BadExtensionValue(at: 0, oid: asn1oid.oid_text(oid)))
+        if t.number == 0
+            // `distributionPoint [0] DistributionPointName`: the tag is
+            // explicit because the field is a CHOICE.
+            let inner = ext_der(asn1read.children_at(src, k.off, limits), oid)!
+            if list.len(inner) != 1
+                return Err(X509BadExtensionValue(at: 0, oid: asn1oid.oid_text(oid)))
+            let it = ext_der(asn1read.peek_tag_at(src, inner[0].off, limits), oid)!
+            if it.class == AsnContext and it.number == 0
+                let names = ext_der(asn1read.children_at(src, inner[0].off, limits), oid)!
+                full = names_of(src, names, oid, limits)!
+            else if it.class == AsnContext and it.number == 1
+                relative = relative_name_at(src, inner[0].off, oid, limits)!
+            else
+                return Err(X509BadExtensionValue(at: 0, oid: asn1oid.oid_text(oid)))
+        else if t.number == 1
+            reasons = reasons_mask(src, k.off, oid, limits)!
+        else if t.number == 2
+            let names = ext_der(asn1read.children_at(src, k.off, limits), oid)!
+            issuer = names_of(src, names, oid, limits)!
+        else
+            return Err(X509BadExtensionValue(at: 0, oid: asn1oid.oid_text(oid)))
+    Ok(X509DistributionPoint { full_name: full, relative_name: relative,
+                               crl_issuer: issuer, reasons: reasons })
+
+// The `ReasonFlags` of a distribution point, as a mask: bit `n` of the
+// ASN.1 module is `1 << n` here, counted from the most significant bit
+// of the first content byte the way every BIT STRING in X.509 is.
+//
+// -1 never comes from here: that is the absent field, which the reader
+// above leaves alone.
+fn reasons_mask(src: Bytes, off: Int, oid: AsnOid, limits: AsnLimits) -> Result<Int, X509Error> []
+    let t = ext_der(asn1read.peek_tag_at(src, off, limits), oid)!
+    let bad = X509BadExtensionValue(at: 0, oid: asn1oid.oid_text(oid))
+    if t.constructed
+        return Err(bad)
+    let c = ext_der(asn1read.implicit_at(src, off, 1, limits), oid)!
+    if c.len == 0
+        return Err(bad)
+    let unused = bytes.byte_at(src, c.off) ?? 8
+    if unused > 7 or c.len == 1 and unused != 0
+        return Err(bad)
+    let b = AsnBitString { unused_bits: unused,
+                           data: bytes.slice(src, c.off + 1, c.off + c.len) }
+    var mask = 0
+    var weight = 1
+    for i in 0..9
+        if asn1univ.bit_at(b, i)
+            mask = mask + weight
+        weight = weight * 2
+    Ok(mask)
+
+// A RelativeDistinguishedName: a SET OF AttributeTypeAndValue, whose
+// DER ordering rule is applied here because the tag was replaced and
+// `asn1univ.set_of_at` cannot see it.
+fn relative_name_at(src: Bytes, off: Int, oid: AsnOid,
+                    limits: AsnLimits) -> Result<[AsnAttribute], X509Error> []
+    let kids = ext_der(asn1read.children_at(src, off, limits), oid)!
+    for i in 1..list.len(kids)
+        let before = bytes.to_hex(asn1read.span_bytes(src, kids[i - 1]))
+        let here = bytes.to_hex(asn1read.span_bytes(src, kids[i]))
+        if here < before
+            return Err(X509BadExtensionValue(at: 0, oid: asn1oid.oid_text(oid)))
+    var out: [AsnAttribute] = []
+    for k in kids
+        let pair = ext_der(asn1univ.sequence_at(src, k.off, limits), oid)!
+        if list.len(pair) < 2
+            return Err(X509BadExtensionValue(at: 0, oid: asn1oid.oid_text(oid)))
+        list.push(out, AsnAttribute {
+            oid: ext_der(asn1univ.oid_at(src, pair[0].off, limits), oid)!,
+            value: ext_der(asn1univ.any_string_at(src, pair[1].off, limits), oid)! })
+    Ok(out)
+
+// One PolicyInformation.
+fn policy_at(src: Bytes, off: Int, oid: AsnOid,
+             limits: AsnLimits) -> Result<X509PolicyInfo, X509Error> []
+    let kids = ext_der(asn1univ.sequence_at(src, off, limits), oid)!
+    if list.len(kids) == 0
+        return Err(X509BadExtensionValue(at: 0, oid: asn1oid.oid_text(oid)))
+    var qualifiers: [X509PolicyQualifier] = []
+    if list.len(kids) > 1
+        for q in ext_der(asn1univ.sequence_at(src, kids[1].off, limits), oid)!
+            let parts = ext_der(asn1univ.sequence_at(src, q.off, limits), oid)!
+            if list.len(parts) < 2
+                return Err(X509BadExtensionValue(at: 0, oid: asn1oid.oid_text(oid)))
+            let whole = ext_der(asn1read.value_span_at(src, parts[1].off, limits), oid)!
+            list.push(qualifiers, X509PolicyQualifier {
+                oid: ext_der(asn1univ.oid_at(src, parts[0].off, limits), oid)!,
+                value: asn1read.span_bytes(src, whole) })
+    Ok(X509PolicyInfo { oid: ext_der(asn1univ.oid_at(src, kids[0].off, limits), oid)!,
+                        qualifiers: qualifiers })
+
+// ── the matching rules of a name constraint ────────────────────────
+
+// Whether a name is at or below a domain: equal, or ending with a dot
+// and the domain.
+//
+// Case-folded, because DNS is and a constraint written `EXAMPLE.COM`
+// constrains `example.com`.  The dot is what makes this a domain match
+// rather than a string suffix: `notexample.com` does NOT end with
+// `.example.com`.
+fn domain_contains(base: Str, host: Str) -> Bool []
+    let b = str.lower(base)
+    let h = str.lower(host)
+    if b == h
+        return true
+    let suffix = "." + b
+    if str.len(h) <= str.len(suffix)
+        return false
+    str.slice(h, str.len(h) - str.len(suffix), str.len(h)) == suffix
+
+// Whether an email address falls under a mailbox, host or domain
+// constraint.
+//
+// RFC 5280 section 4.2.1.10: a constraint holding an `@` is a whole
+// mailbox and must match exactly; one beginning with a dot is a domain,
+// matching every host below it; anything else is a host and matches
+// exactly.
+fn email_contains(constraint: Str, address: Str) -> Bool []
+    let c = str.lower(constraint)
+    let a = str.lower(address)
+    if str.contains(c, "@")
+        return a == c
+    if str.len(c) > 1 and str.starts_with(c, ".")
+        return domain_contains(str.slice(c, 1, str.len(c)), host_of(a))
+    domain_contains(c, host_of(a))
+
+// Whether a URI falls under a host constraint.
+fn uri_contains(base: Str, uri: Str) -> Bool []
+    let host = host_of_uri(uri)
+    if str.len(host) == 0
+        return false
+    domain_contains(base, host)
+
+// The part of an email address after the last `@`, or the whole string
+// when there is none.
+fn host_of(address: Str) -> Str []
+    let n = str.len(address)
+    var at = -1
+    for i in 0..n
+        if str.byte_at_or(address, i, 0) == '@'
+            at = i
+    if at < 0
+        return address
+    str.slice(address, at + 1, n)
+
+// The authority a URI names: after `scheme://` and before the first
+// `/`, `:`, `?` or `#`.
+fn host_of_uri(uri: Str) -> Str []
+    let n = str.len(uri)
+    var start = 0
+    if let Some(i) = str.index(uri, "://")
+        start = i + 3
+    var end = n
+    if start < n
+        for i in start..n
+            let b = str.byte_at_or(uri, i, 0)
+            if b == '/' or b == ':' or b == '?' or b == '#'
+                if i < end
+                    end = i
+    if end <= start
+        return ""
+    str.slice(uri, start, end)
+
+// Whether an address falls under a constraint that carries a mask.
+//
+// `base` is the address followed by a mask of the same length, which
+// is what RFC 5280 section 4.2.1.10 puts in an `iPAddress` subtree; the
+// candidate must have the address's own length and agree wherever the
+// mask has a bit.
+fn address_contains(base: Bytes, here: Bytes) -> Bool []
+    let nb = bytes.len(base)
+    let nh = bytes.len(here)
+    if nb != 2 * nh
+        return false
+    let half = nb / 2
+    for i in 0..nh
+        let mask = bytes.byte_at(base, half + i) ?? 0
+        let want = bytes.byte_at(base, i) ?? 0
+        let got = bytes.byte_at(here, i) ?? 0
+        if (want & mask) != (got & mask)
+            return false
+    true
+
+// Whether a directory name begins with a subtree's relative names.
+//
+// The comparison is over PARSED attributes here and not over DER,
+// because this call has no document to point into: a name constraint
+// arrives as a `GeneralName` and not beside its bytes.  Attribute
+// values are compared by the X.500 rule a directory uses — case
+// folded, runs of spaces collapsed — which is the opposite of what
+// `x509name.issuer_matches_subject` does and right for this one place:
+// a constraint written `O=Acme Ltd` constrains a name written
+// `O=ACME  LTD`.
+fn name_begins_with(n: AsnName, base: AsnName) -> Bool []
+    if list.len(base.rdns) > list.len(n.rdns)
+        return false
+    for i in 0..list.len(base.rdns)
+        if not rdn_equals(n.rdns[i], base.rdns[i])
+            return false
+    true
+
+// Whether two relative distinguished names hold the same attributes.
+//
+// By set and not by position: the encoding is a SET, so its order is
+// the writer's business and two writers may disagree.
+fn rdn_equals(a: AsnRdn, b: AsnRdn) -> Bool []
+    if list.len(a.attributes) != list.len(b.attributes)
+        return false
+    for x in a.attributes
+        if not attribute_in(x, b.attributes)
+            return false
+    true
+
+// Whether an attribute appears in a set of them.
+fn attribute_in(x: AsnAttribute, attrs: [AsnAttribute]) -> Bool []
+    for y in attrs
+        if asn1oid.equals(x.oid, y.oid) and folded(x.value) == folded(y.value)
+            return true
+    false
+
+// A string under the X.500 case-ignore rule: lower case, with leading
+// and trailing space gone and every run of spaces written as one.
+fn folded(s: Str) -> Str []
+    let parts = str.split(str.trim(s), " ")
+    var out: [Str] = []
+    for p in parts
+        if str.len(p) > 0
+            list.push(out, str.lower(p))
+    list.join(out, " ")
+
+// Which arm of `X509GeneralName` a name is, so two names can be asked
+// whether a constraint applies to their form at all.
+//
+// `x400Address` and `ediPartyName` share one number: nothing matches
+// either, so telling them apart would be a distinction with no reader.
+fn form_of(n: X509GeneralName) -> Int []
+    match n
+        X509OtherName(_, _)       => 0
+        X509EmailAddress(_)       => 1
+        X509DnsName(_)            => 2
+        X509UnsupportedName(_, _) => 3
+        X509DirectoryName(_)      => 4
+        X509Uri(_)                => 6
+        X509IpAddress(_)          => 7
+        X509RegisteredId(_)       => 8
+
+// Whether a constraint names the same form of name as this one, which
+// is what decides whether the constraint applies to it at all.
+fn same_form(a: X509GeneralName, b: X509GeneralName) -> Bool []
+    form_of(a) == form_of(b)
+
+// An IP address as text: four octets as a dotted quad, sixteen as
+// eight hexadecimal groups.  Anything else is hex, because a name
+// constraint's address-and-mask is neither.
+fn ip_text(octets: Bytes) -> Str []
+    let n = bytes.len(octets)
+    if n == 4
+        let a = bytes.byte_at(octets, 0) ?? 0
+        let b = bytes.byte_at(octets, 1) ?? 0
+        let c = bytes.byte_at(octets, 2) ?? 0
+        let d = bytes.byte_at(octets, 3) ?? 0
+        return "${a}.${b}.${c}.${d}"
+    if n == 16
+        var groups: [Str] = []
+        for i in 0..8
+            let hi = bytes.byte_at(octets, 2 * i) ?? 0
+            let lo = bytes.byte_at(octets, 2 * i + 1) ?? 0
+            list.push(groups, bytes.to_hex(bytes.from_byte_list([hi, lo])))
+        return list.join(groups, ":")
+    bytes.to_hex(octets)
 
 // ── basic constraints, RFC 5280 section 4.2.1.9 ─────────────────────
 
@@ -245,7 +702,18 @@ pub struct X509BasicConstraints
 // ```
 pub fn basic_constraints(exts: [AsnExtension],
                          limits: AsnLimits) -> Result<?X509BasicConstraints, X509Error> []
-    todo("x509-nv.x509ext.basic_constraints")
+    let Some(e) = find(exts, asn1oid.oid_basic_constraints()) else return Ok(None)
+    var is_ca = false
+    var path_len = -1
+    for k in ext_sequence(e.value, e.oid, limits)!
+        let t = ext_der(asn1read.peek_tag_at(e.value, k.off, limits), e.oid)!
+        if t.class == AsnUniversal and t.number == 1
+            is_ca = ext_der(asn1univ.boolean_at(e.value, k.off, limits), e.oid)!
+        else if t.class == AsnUniversal and t.number == 2
+            path_len = ext_der(asn1univ.integer_at(e.value, k.off, limits), e.oid)!
+        else
+            return Err(X509BadExtensionValue(at: 0, oid: asn1oid.oid_text(e.oid)))
+    Ok(Some(X509BasicConstraints { is_ca: is_ca, path_len: path_len }))
 
 // Whether the certificate's extensions say it is a certificate
 // authority.
@@ -253,7 +721,10 @@ pub fn basic_constraints(exts: [AsnExtension],
 // False when `basicConstraints` is absent, which is what RFC 5280
 // section 4.2.1.9 means by its absence.
 pub fn is_ca(exts: [AsnExtension], limits: AsnLimits) -> Result<Bool, X509Error> []
-    todo("x509-nv.x509ext.is_ca")
+    let constraints = basic_constraints(exts, limits)!
+    match constraints
+        Some(b) => Ok(b.is_ca)
+        None    => Ok(false)
 
 // ── key usage, RFC 5280 section 4.2.1.3 ─────────────────────────────
 
@@ -327,7 +798,9 @@ pub struct X509KeyUsage
 // `basicConstraints`'s absence means and is the pair of rules most
 // often confused.
 pub fn key_usage(exts: [AsnExtension], limits: AsnLimits) -> Result<?X509KeyUsage, X509Error> []
-    todo("x509-nv.x509ext.key_usage")
+    let Some(e) = find(exts, asn1oid.oid_key_usage()) else return Ok(None)
+    let usage = ext_bit_string(e.value, e.oid, limits)!
+    Ok(Some(key_usage_of_bits(usage)))
 
 // The nine bits out of a BIT STRING, numbered as RFC 5280 section
 // 4.2.1.3 numbers them.
@@ -337,7 +810,15 @@ pub fn key_usage(exts: [AsnExtension], limits: AsnLimits) -> Result<?X509KeyUsag
 // re-derive the numbering.  A bit past the end of a short BIT STRING
 // is false, which is what a two-bit key usage means.
 pub fn key_usage_of_bits(b: AsnBitString) -> X509KeyUsage []
-    todo("x509-nv.x509ext.key_usage_of_bits")
+    X509KeyUsage { digital_signature: asn1univ.bit_at(b, 0),
+                   non_repudiation: asn1univ.bit_at(b, 1),
+                   key_encipherment: asn1univ.bit_at(b, 2),
+                   data_encipherment: asn1univ.bit_at(b, 3),
+                   key_agreement: asn1univ.bit_at(b, 4),
+                   key_cert_sign: asn1univ.bit_at(b, 5),
+                   crl_sign: asn1univ.bit_at(b, 6),
+                   encipher_only: asn1univ.bit_at(b, 7),
+                   decipher_only: asn1univ.bit_at(b, 8) }
 
 // Whether the bit with this RFC 5280 number is set.
 //
@@ -355,7 +836,17 @@ pub fn key_usage_of_bits(b: AsnBitString) -> X509KeyUsage []
 //     println("${x509ext.key_usage_bit(ku, 5)}")   // true — keyCertSign
 // ```
 pub fn key_usage_bit(k: X509KeyUsage, bit: Int) -> Bool []
-    todo("x509-nv.x509ext.key_usage_bit")
+    match bit
+        0 => k.digital_signature
+        1 => k.non_repudiation
+        2 => k.key_encipherment
+        3 => k.data_encipherment
+        4 => k.key_agreement
+        5 => k.key_cert_sign
+        6 => k.crl_sign
+        7 => k.encipher_only
+        8 => k.decipher_only
+        _ => false
 
 // The ASN.1 module's own name for a key-usage bit — `"keyCertSign"`,
 // `"digitalSignature"` — or `""` for a number outside `0 ..= 8`.
@@ -363,7 +854,17 @@ pub fn key_usage_bit(k: X509KeyUsage, bit: Int) -> Bool []
 // For a report, and for a refusal that has to say which bit was
 // missing in the words the specification uses.
 pub fn key_usage_name(bit: Int) -> Str []
-    todo("x509-nv.x509ext.key_usage_name")
+    match bit
+        0 => "digitalSignature"
+        1 => "nonRepudiation"
+        2 => "keyEncipherment"
+        3 => "dataEncipherment"
+        4 => "keyAgreement"
+        5 => "keyCertSign"
+        6 => "cRLSign"
+        7 => "encipherOnly"
+        8 => "decipherOnly"
+        _ => ""
 
 // ── extended key usage, RFC 5280 section 4.2.1.12 ───────────────────
 
@@ -376,7 +877,11 @@ pub fn key_usage_name(bit: Int) -> Str []
 // release of this package.
 pub fn extended_key_usage(exts: [AsnExtension],
                           limits: AsnLimits) -> Result<?[AsnOid], X509Error> []
-    todo("x509-nv.x509ext.extended_key_usage")
+    let Some(e) = find(exts, asn1oid.oid_ext_key_usage()) else return Ok(None)
+    var out: [AsnOid] = []
+    for k in ext_sequence(e.value, e.oid, limits)!
+        list.push(out, ext_der(asn1univ.oid_at(e.value, k.off, limits), e.oid)!)
+    Ok(Some(out))
 
 // Whether a purpose is permitted by a list of extended key usages.
 //
@@ -391,7 +896,8 @@ pub fn extended_key_usage(exts: [AsnExtension],
 //     println("${x509ext.has_key_purpose([], x509ext.oid_kp_server_auth())}")
 // ```
 pub fn has_key_purpose(purposes: [AsnOid], purpose: AsnOid) -> Bool []
-    todo("x509-nv.x509ext.has_key_purpose")
+    list.contains(purposes, purpose)
+        or list.contains(purposes, oid_any_extended_key_usage())
 
 // ── general names, RFC 5280 section 4.2.1.6 ─────────────────────────
 
@@ -436,23 +942,35 @@ pub enum X509GeneralName
 // extension MUST be present and MUST be critical.
 pub fn subject_alt_name(exts: [AsnExtension],
                         limits: AsnLimits) -> Result<?[X509GeneralName], X509Error> []
-    todo("x509-nv.x509ext.subject_alt_name")
+    let Some(e) = find(exts, asn1oid.oid_subject_alt_name()) else return Ok(None)
+    let kids = ext_sequence(e.value, e.oid, limits)!
+    Ok(Some(names_of(e.value, kids, e.oid, limits)!))
 
 // The `issuerAltName` extension, or `None`.
 pub fn issuer_alt_name(exts: [AsnExtension],
                        limits: AsnLimits) -> Result<?[X509GeneralName], X509Error> []
-    todo("x509-nv.x509ext.issuer_alt_name")
+    let Some(e) = find(exts, oid_issuer_alt_name()) else return Ok(None)
+    let kids = ext_sequence(e.value, e.oid, limits)!
+    Ok(Some(names_of(e.value, kids, e.oid, limits)!))
 
 // Every DNS name in a list of general names, in order.
 //
 // The call a program matching a hostname makes.
 pub fn dns_names(names: [X509GeneralName]) -> [Str] []
-    todo("x509-nv.x509ext.dns_names")
+    var out: [Str] = []
+    for n in names
+        if let X509DnsName(name) = n
+            list.push(out, name)
+    out
 
 // Every IP address in a list of general names, as its four or sixteen
 // bytes.
 pub fn ip_addresses(names: [X509GeneralName]) -> [Bytes] []
-    todo("x509-nv.x509ext.ip_addresses")
+    var out: [Bytes] = []
+    for n in names
+        if let X509IpAddress(octets) = n
+            list.push(out, bytes.clone(octets))
+    out
 
 // A general name as one line of text, for a report: `"DNS:example.com"`,
 // `"IP:192.0.2.1"`, `"email:ca@example.com"`, `"URI:http://..."`,
@@ -462,7 +980,15 @@ pub fn ip_addresses(names: [X509GeneralName]) -> [Bytes] []
 // comparing this package's output against a certificate dump should
 // not have to translate.
 pub fn general_name_text(n: X509GeneralName) -> Str []
-    todo("x509-nv.x509ext.general_name_text")
+    match n
+        X509DnsName(name)           => "DNS:${name}"
+        X509IpAddress(octets)       => "IP:${ip_text(octets)}"
+        X509EmailAddress(address)   => "email:${address}"
+        X509Uri(uri)                => "URI:${uri}"
+        X509DirectoryName(name)     => "DirName:${x509name.to_rfc4514(name)}"
+        X509RegisteredId(oid)       => "RID:${asn1oid.oid_text(oid)}"
+        X509OtherName(oid, _)       => "otherName:${asn1oid.oid_text(oid)}"
+        X509UnsupportedName(tag, _) => "unsupported:${tag}"
 
 // ── key identifiers, RFC 5280 sections 4.2.1.1 and 4.2.1.2 ──────────
 
@@ -490,12 +1016,35 @@ pub struct X509AuthorityKeyId
 // compared would reject certificates that are perfectly valid.
 pub fn subject_key_identifier(exts: [AsnExtension],
                               limits: AsnLimits) -> Result<?Bytes, X509Error> []
-    todo("x509-nv.x509ext.subject_key_identifier")
+    let Some(e) = find(exts, oid_subject_key_identifier()) else return Ok(None)
+    one_value(e.value, e.oid, limits)!
+    let id = ext_der(asn1univ.octet_string_at(e.value, 0, limits), e.oid)!
+    Ok(Some(id))
 
 // The `authorityKeyIdentifier` extension, or `None`.
 pub fn authority_key_identifier(exts: [AsnExtension],
                                 limits: AsnLimits) -> Result<?X509AuthorityKeyId, X509Error> []
-    todo("x509-nv.x509ext.authority_key_identifier")
+    let Some(e) = find(exts, oid_authority_key_identifier()) else return Ok(None)
+    var key: ?Bytes = None
+    var issuer: [X509GeneralName] = []
+    var serial: ?Bytes = None
+    for k in ext_sequence(e.value, e.oid, limits)!
+        let t = ext_der(asn1read.peek_tag_at(e.value, k.off, limits), e.oid)!
+        if t.class != AsnContext
+            return Err(X509BadExtensionValue(at: 0, oid: asn1oid.oid_text(e.oid)))
+        if t.number == 0
+            let c = ext_der(asn1read.implicit_at(e.value, k.off, 0, limits), e.oid)!
+            key = Some(asn1read.span_bytes(e.value, c))
+        else if t.number == 1
+            let kids = ext_der(asn1read.children_at(e.value, k.off, limits), e.oid)!
+            issuer = names_of(e.value, kids, e.oid, limits)!
+        else if t.number == 2
+            let c = ext_der(asn1read.implicit_at(e.value, k.off, 2, limits), e.oid)!
+            serial = Some(asn1read.span_bytes(e.value, c))
+        else
+            return Err(X509BadExtensionValue(at: 0, oid: asn1oid.oid_text(e.oid)))
+    Ok(Some(X509AuthorityKeyId { key_identifier: key, authority_cert_issuer: issuer,
+                                 authority_cert_serial: serial }))
 
 // ── name constraints, RFC 5280 section 4.2.1.10 ─────────────────────
 
@@ -537,7 +1086,18 @@ pub struct X509NameConstraints
 // costs.
 pub fn name_constraints(exts: [AsnExtension],
                         limits: AsnLimits) -> Result<?X509NameConstraints, X509Error> []
-    todo("x509-nv.x509ext.name_constraints")
+    let Some(e) = find(exts, oid_name_constraints()) else return Ok(None)
+    var permitted: [X509GeneralSubtree] = []
+    var excluded: [X509GeneralSubtree] = []
+    for k in ext_sequence(e.value, e.oid, limits)!
+        let t = ext_der(asn1read.peek_tag_at(e.value, k.off, limits), e.oid)!
+        if t.class == AsnContext and t.number == 0
+            permitted = subtrees_at(e.value, k.off, e.oid, limits)!
+        else if t.class == AsnContext and t.number == 1
+            excluded = subtrees_at(e.value, k.off, e.oid, limits)!
+        else
+            return Err(X509BadExtensionValue(at: 0, oid: asn1oid.oid_text(e.oid)))
+    Ok(Some(X509NameConstraints { permitted: permitted, excluded: excluded }))
 
 // Whether a name falls inside a subtree.
 //
@@ -548,7 +1108,32 @@ pub fn name_constraints(exts: [AsnExtension],
 // compared under the mask that follows it; a directory name matches
 // any name beginning with the subtree's relative names.
 pub fn subtree_contains(subtree: X509GeneralSubtree, name: X509GeneralName) -> Bool []
-    todo("x509-nv.x509ext.subtree_contains")
+    match subtree.base
+        X509DnsName(base)       =>
+            match name
+                X509DnsName(here) => domain_contains(base, here)
+                _                 => false
+        X509EmailAddress(base)  =>
+            match name
+                X509EmailAddress(here) => email_contains(base, here)
+                _                      => false
+        X509IpAddress(base)     =>
+            match name
+                X509IpAddress(here) => address_contains(base, here)
+                _                   => false
+        X509DirectoryName(base) =>
+            match name
+                X509DirectoryName(here) => name_begins_with(here, base)
+                _                       => false
+        X509Uri(base)           =>
+            match name
+                X509Uri(here) => uri_contains(base, here)
+                _             => false
+        X509RegisteredId(base)  =>
+            match name
+                X509RegisteredId(here) => asn1oid.equals(base, here)
+                _                      => false
+        _                       => false
 
 // Whether a constraint permits a name: inside some permitted subtree
 // of its own form, and inside no excluded one.
@@ -557,7 +1142,16 @@ pub fn subtree_contains(subtree: X509GeneralSubtree, name: X509GeneralName) -> B
 // which is RFC 5280 section 4.2.1.10's rule and the one that surprises
 // people: constraining DNS names says nothing about email addresses.
 pub fn constraints_permit(c: X509NameConstraints, name: X509GeneralName) -> Bool []
-    todo("x509-nv.x509ext.constraints_permit")
+    for s in c.excluded
+        if subtree_contains(s, name)
+            return false
+    var named = false
+    for s in c.permitted
+        if same_form(s.base, name)
+            if subtree_contains(s, name)
+                return true
+            named = true
+    not named
 
 // ── CRL distribution points, RFC 5280 section 4.2.1.13 ──────────────
 
@@ -582,13 +1176,21 @@ pub struct X509DistributionPoint
 // The `cRLDistributionPoints` extension, or `None`.
 pub fn crl_distribution_points(exts: [AsnExtension],
                                limits: AsnLimits) -> Result<?[X509DistributionPoint], X509Error> []
-    todo("x509-nv.x509ext.crl_distribution_points")
+    let Some(e) = find(exts, oid_crl_distribution_points()) else return Ok(None)
+    var out: [X509DistributionPoint] = []
+    for k in ext_sequence(e.value, e.oid, limits)!
+        list.push(out, point_at(e.value, k.off, e.oid, limits)!)
+    Ok(Some(out))
 
 // Every URI a distribution point names, in order.
 //
 // The list a program that fetches revocation lists walks.
 pub fn distribution_point_uris(p: X509DistributionPoint) -> [Str] []
-    todo("x509-nv.x509ext.distribution_point_uris")
+    var out: [Str] = []
+    for n in p.full_name
+        if let X509Uri(uri) = n
+            list.push(out, uri)
+    out
 
 // ── certificate policies, RFC 5280 section 4.2.1.4 ──────────────────
 
@@ -618,14 +1220,25 @@ pub struct X509PolicyInfo
 // certificate asserted and lets a caller decide.
 pub fn certificate_policies(exts: [AsnExtension],
                             limits: AsnLimits) -> Result<?[X509PolicyInfo], X509Error> []
-    todo("x509-nv.x509ext.certificate_policies")
+    let Some(e) = find(exts, oid_certificate_policies()) else return Ok(None)
+    var out: [X509PolicyInfo] = []
+    for k in ext_sequence(e.value, e.oid, limits)!
+        list.push(out, policy_at(e.value, k.off, e.oid, limits)!)
+    Ok(Some(out))
 
 // Whether a list of policies holds this one, honouring `anyPolicy`.
 //
 // True when the list names the policy, and true when it names
 // `2.5.29.32.0`.
 pub fn asserts_policy(policies: [X509PolicyInfo], o: AsnOid) -> Bool []
-    todo("x509-nv.x509ext.asserts_policy")
+    for p in policies
+        if asn1oid.equals(p.oid, o)
+            return true
+    let any = oid_any_policy()
+    for p in policies
+        if asn1oid.equals(p.oid, any)
+            return true
+    false
 
 // ── the raw value ───────────────────────────────────────────────────
 
@@ -636,4 +1249,4 @@ pub fn asserts_policy(policies: [X509PolicyInfo], o: AsnOid) -> Bool []
 // caller re-emits: an extension's bytes are inside the signed region,
 // so re-encoding a parsed one would change the signature.
 pub fn extension_value(e: AsnExtension) -> Bytes []
-    todo("x509-nv.x509ext.extension_value")
+    bytes.clone(e.value)

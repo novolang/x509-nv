@@ -1,9 +1,6 @@
 // x509cert — an X.509 certificate, read out of the bytes the caller
 // already holds.
 //
-// Every body is a `todo()`.  The signatures are the design, and the
-// compiler checks them as claims; see the README for the stamp.
-//
 // WHAT A CERTIFICATE IS.  RFC 5280 section 4.1 gives it three fields.
 // The `tbsCertificate` — "to be signed" — holds everything the
 // certificate asserts: a version, a serial number, the algorithm the
@@ -47,6 +44,15 @@
 // of thing a device holds in a register file.
 
 use std.bytes
+use asn1oid
+use asn1pkix
+use asn1read
+use asn1univ
+use civil
+use iso8601
+use x509err
+use x509ext
+use x509name
 
 // The version number a certificate with extensions must carry.
 //
@@ -133,6 +139,158 @@ pub struct X509Cert
     // caller writes back out, or hashes to get a fingerprint.
     der: AsnSpan
 
+// ── the parts the readers below share ──────────────────────────────
+
+// An asn1-nv refusal as this package's own.
+//
+// The cause is carried whole rather than flattened to a string, so a
+// caller that wants to know it was a non-minimal length rather than a
+// truncation can match on `decode_cause`.
+fn not_der<T>(r: Result<T, AsnDecodeError>) -> Result<T, X509Error> []
+    match r
+        Ok(v)  => Ok(v)
+        Err(e) => Err(X509NotDer(cause: e))
+
+// The children of the SEQUENCE at `off`, refusing one with fewer than
+// the named fields.
+fn fields(src: Bytes, off: Int, limits: AsnLimits, names: [Str]) -> Result<[AsnSpan], X509Error> []
+    let kids = not_der(asn1univ.sequence_at(src, off, limits))!
+    if list.len(kids) < list.len(names)
+        return Err(X509MissingField(at: off, field: names[list.len(kids)]))
+    Ok(kids)
+
+// The Extensions SEQUENCE at `off`, in the order it was written.
+fn read_extensions(src: Bytes, off: Int, limits: AsnLimits) -> Result<[AsnExtension], X509Error> []
+    var out: [AsnExtension] = []
+    for e in not_der(asn1univ.sequence_at(src, off, limits))!
+        let parts = fields(src, e.off, limits, ["extnID", "extnValue"])!
+        // `critical BOOLEAN DEFAULT FALSE` sits between the two when it
+        // is written.
+        let critical = if list.len(parts) > 2
+            not_der(asn1univ.boolean_at(src, parts[1].off, limits))!
+        else
+            false
+        list.push(out, AsnExtension {
+            oid: not_der(asn1univ.oid_at(src, parts[0].off, limits))!,
+            critical: critical,
+            value: not_der(asn1univ.octet_string_at(src,
+                            parts[list.len(parts) - 1].off, limits))! })
+    Ok(out)
+
+// A `[n] IMPLICIT BIT STRING`, which is a BIT STRING whose identifier
+// octet was replaced by the context tag.
+//
+// `asn1univ.bit_string_at` reads the universal form, whose tag is not
+// there, so the content is read here and the unused count taken from
+// its first byte.  The rules X.690 states for the type are applied by
+// hand, in the same order that reader applies them.
+fn implicit_bit_string(src: Bytes, off: Int, number: Int, field: Str,
+                       limits: AsnLimits) -> Result<AsnBitString, X509Error> []
+    let t = not_der(asn1read.peek_tag_at(src, off, limits))!
+    if t.constructed
+        return Err(X509ImpossibleField(at: off, field: field,
+                                       why: "a constructed BIT STRING"))
+    let c = not_der(asn1read.implicit_at(src, off, number, limits))!
+    if c.len == 0
+        return Err(X509ImpossibleField(at: off, field: field,
+                                       why: "an empty BIT STRING"))
+    let unused = bytes.byte_at(src, c.off) ?? 8
+    if unused > 7
+        return Err(X509ImpossibleField(at: off, field: field,
+                                       why: "more than seven unused bits"))
+    if c.len == 1 and unused != 0
+        return Err(X509ImpossibleField(at: off, field: field,
+                                       why: "a non-zero unused count on empty content"))
+    Ok(AsnBitString { unused_bits: unused,
+                      data: bytes.slice(src, c.off + 1, c.off + c.len) })
+
+// Whether two algorithm identifiers' parameters are both absent, or
+// both present with the same encoding.
+//
+// Absent and present-but-NULL are DIFFERENT: RFC 4055 and RFC 8410 both
+// turn on whether the parameter is written at all, and a comparison
+// that treated `05 00` as no parameter would accept one algorithm's
+// identifier for another's.
+fn same_parameters(a: ?Bytes, b: ?Bytes) -> Bool []
+    if let Some(x) = a
+        if let Some(y) = b
+            return bytes.to_hex(x) == bytes.to_hex(y)
+        return false
+    b == None
+
+// Whether the certificate's `subjectAltName` is present and critical.
+//
+// RFC 5280 section 4.1.2.6: an empty subject is conforming only under
+// that one extension, written critically.  Non-critical is not enough —
+// a reader that did not understand it would be left with a certificate
+// about nobody.
+fn subject_alt_is_critical(c: X509Cert) -> Bool []
+    x509ext.is_critical(c.extensions, asn1oid.oid_subject_alt_name())
+
+// A moment as the text a refusal carries: `2026-03-15T09:30:00Z`.
+//
+// RFC 3339 at offset zero.  X.509's times have no zone and mean UTC, so
+// there is one rendering of a moment and this is it.
+fn date_text(dt: CivilDateTime) -> Str []
+    iso8601.format_rfc3339(dt, 0)
+
+// The whole certificate at `off`, in the bytes the caller supplied.
+fn cert_at(src: Bytes, off: Int, limits: AsnLimits) -> Result<X509Cert, X509Error> []
+    let whole = not_der(asn1read.value_span_at(src, off, limits))!
+    let outer = fields(src, off, limits,
+                       ["tbsCertificate", "signatureAlgorithm", "signatureValue"])!
+    let tbs = outer[0]
+    let parts = not_der(asn1univ.sequence_at(src, tbs.off, limits))!
+    // `[0] EXPLICIT Version DEFAULT v1`: present, or version 1.
+    var i = 0
+    var version = X509_VERSION_1
+    if list.len(parts) > 0
+        let lead = not_der(asn1read.peek_tag_at(src, parts[0].off, limits))!
+        if lead.class == AsnContext
+            not_der(asn1read.explicit_at(src, parts[0].off, 0, limits))!
+            let inner = not_der(asn1read.expect_context_at(src, parts[0].off, 0, limits))!
+            version = not_der(asn1univ.integer_at(src, inner.off, limits))! + 1
+            if version < X509_VERSION_1 or version > X509_VERSION_3
+                return Err(X509BadVersion(at: parts[0].off, version: version))
+            i = 1
+    let names = ["serialNumber", "signature", "issuer", "validity", "subject",
+                 "subjectPublicKeyInfo"]
+    if list.len(parts) < i + 6
+        return Err(X509MissingField(at: tbs.off, field: names[list.len(parts) - i]))
+    let validity = fields(src, parts[i + 3].off, limits, ["notBefore", "notAfter"])!
+    // `[1]`, `[2]` and the `[3] EXPLICIT Extensions` are optional and
+    // are distinguished by their tags, in this order.
+    var issuer_unique: ?AsnBitString = None
+    var subject_unique: ?AsnBitString = None
+    var extensions: [AsnExtension] = []
+    for k in parts[i + 6:]
+        let t = not_der(asn1read.peek_tag_at(src, k.off, limits))!
+        if t.class == AsnContext and t.number == 1
+            issuer_unique = Some(implicit_bit_string(src, k.off, 1, "issuerUniqueID",
+                                                     limits)!)
+        else if t.class == AsnContext and t.number == 2
+            subject_unique = Some(implicit_bit_string(src, k.off, 2,
+                                                      "subjectUniqueID", limits)!)
+        else if t.class == AsnContext and t.number == 3
+            not_der(asn1read.explicit_at(src, k.off, 3, limits))!
+            let seq = not_der(asn1read.expect_context_at(src, k.off, 3, limits))!
+            extensions = read_extensions(src, seq.off, limits)!
+    Ok(X509Cert {
+        version: version,
+        serial: not_der(asn1univ.integer_bytes_at(src, parts[i].off, limits))!,
+        signature_algorithm: not_der(asn1pkix.algorithm_at(src, parts[i + 1].off, limits))!,
+        issuer: not_der(asn1pkix.name_at(src, parts[i + 2].off, limits))!,
+        subject: not_der(asn1pkix.name_at(src, parts[i + 4].off, limits))!,
+        not_before: not_der(asn1univ.any_time_at(src, validity[0].off, limits))!,
+        not_after: not_der(asn1univ.any_time_at(src, validity[1].off, limits))!,
+        public_key: not_der(asn1pkix.spki_at(src, parts[i + 5].off, limits))!,
+        extensions: extensions,
+        issuer_unique_id: issuer_unique,
+        subject_unique_id: subject_unique,
+        outer_algorithm: not_der(asn1pkix.algorithm_at(src, outer[1].off, limits))!,
+        signature: not_der(asn1univ.bit_string_at(src, outer[2].off, limits))!,
+        tbs: tbs, der: whole })
+
 // The certificate one DER document holds.
 //
 // Trailing bytes are refused: a `.der` file is exactly one
@@ -152,7 +310,8 @@ pub struct X509Cert
 //         Err(e) => println(e.message())
 // ```
 pub fn parse(src: Bytes, limits: AsnLimits) -> Result<X509Cert, X509Error> []
-    todo("x509-nv.x509cert.parse")
+    not_der(asn1read.read_document(src, limits))!
+    cert_at(src, 0, limits)
 
 // The certificate at an offset inside a larger document.
 //
@@ -160,7 +319,7 @@ pub fn parse(src: Bytes, limits: AsnLimits) -> Result<X509Cert, X509Error> []
 // message or a chain file: the certificates sit end to end and each
 // one begins where the last ended.
 pub fn parse_at(src: Bytes, off: Int, limits: AsnLimits) -> Result<X509Cert, X509Error> []
-    todo("x509-nv.x509cert.parse_at")
+    cert_at(src, off, limits)
 
 // Every certificate in a buffer holding several end to end, in the
 // order they were written.
@@ -170,7 +329,15 @@ pub fn parse_at(src: Bytes, off: Int, limits: AsnLimits) -> Result<X509Cert, X50
 // checked here; `x509path.check_chain_order` is the call that asks
 // whether each one was issued by the next.
 pub fn parse_all(src: Bytes, limits: AsnLimits) -> Result<[X509Cert], X509Error> []
-    todo("x509-nv.x509cert.parse_all")
+    var out: [X509Cert] = []
+    var off = 0
+    loop
+        if off >= bytes.len(src)
+            break
+        let c = cert_at(src, off, limits)!
+        list.push(out, c)
+        off = off + c.der.len
+    Ok(out)
 
 // The bytes of the tbsCertificate, exactly as they arrived.
 //
@@ -190,20 +357,20 @@ pub fn parse_all(src: Bytes, limits: AsnLimits) -> Result<[X509Cert], X509Error>
 //         Ok(c)  => println("${bytes.len(x509cert.tbs_bytes(der, c))}")
 // ```
 pub fn tbs_bytes(src: Bytes, c: X509Cert) -> Bytes []
-    todo("x509-nv.x509cert.tbs_bytes")
+    asn1read.span_bytes(src, c.tbs)
 
 // The span of the tbsCertificate, without copying it.
 //
 // For a caller that hashes in place, or that wants to know how big the
 // signed region is before deciding to.
 pub fn tbs_span(c: X509Cert) -> AsnSpan []
-    todo("x509-nv.x509cert.tbs_span")
+    c.tbs
 
 // The bytes of the whole certificate, exactly as they arrived.
 //
 // What a fingerprint is computed over, and what a cache stores.
 pub fn der_bytes(src: Bytes, c: X509Cert) -> Bytes []
-    todo("x509-nv.x509cert.der_bytes")
+    asn1read.span_bytes(src, c.der)
 
 // The raw signature bytes, out of the BIT STRING they travel in.
 //
@@ -213,7 +380,10 @@ pub fn der_bytes(src: Bytes, c: X509Cert) -> Bytes []
 // the sixty-four bytes directly.  `X509ImpossibleField` when the BIT
 // STRING has unused bits, which a signature never does.
 pub fn signature_bytes(c: X509Cert) -> Result<Bytes, X509Error> []
-    todo("x509-nv.x509cert.signature_bytes")
+    if c.signature.unused_bits != 0
+        return Err(X509ImpossibleField(at: c.der.off, field: "signatureValue",
+                                       why: "the BIT STRING has unused bits"))
+    Ok(bytes.clone(c.signature.data))
 
 // The serial number as lower-case hex, with no separators and the
 // leading zero kept.
@@ -221,7 +391,7 @@ pub fn signature_bytes(c: X509Cert) -> Result<Bytes, X509Error> []
 // The form every certificate viewer and every CA's own database
 // prints, and the form a revocation list is looked up by.
 pub fn serial_hex(c: X509Cert) -> Str []
-    todo("x509-nv.x509cert.serial_hex")
+    bytes.to_hex(c.serial)
 
 // Whether the instant falls inside the validity period, inclusive at
 // both ends.
@@ -247,7 +417,8 @@ pub fn serial_hex(c: X509Cert) -> Str []
 //         Ok(c)  => println("${x509cert.is_valid_at(c, at)}")
 // ```
 pub fn is_valid_at(c: X509Cert, at: CivilDateTime) -> Bool []
-    todo("x509-nv.x509cert.is_valid_at")
+    civil.compare_datetime(c.not_before, at) <= 0
+        and civil.compare_datetime(at, c.not_after) <= 0
 
 // The refusal the validity period produces at this instant, or `None`
 // when it produces none.
@@ -259,7 +430,11 @@ pub fn is_valid_at(c: X509Cert, at: CivilDateTime) -> Bool []
 // that has expired is a deployment that ran late; they need different
 // people told.
 pub fn check_validity_at(c: X509Cert, at: CivilDateTime, index: Int) -> ?X509Error []
-    todo("x509-nv.x509cert.check_validity_at")
+    if civil.compare_datetime(at, c.not_before) < 0
+        return Some(X509CertNotYetValid(index: index, not_before: date_text(c.not_before)))
+    if civil.compare_datetime(c.not_after, at) < 0
+        return Some(X509CertExpired(index: index, not_after: date_text(c.not_after)))
+    None
 
 // Whether the certificate's issuer name and subject name have the same
 // encoding.
@@ -271,7 +446,7 @@ pub fn check_validity_at(c: X509Cert, at: CivilDateTime, index: Int) -> ?X509Err
 // they do not count against the path length.  Whether it is
 // self-signed is a question for a verifier, and `x509verify` asks it.
 pub fn is_self_issued(src: Bytes, c: X509Cert) -> Bool []
-    todo("x509-nv.x509cert.is_self_issued")
+    x509name.issuer_matches_subject(src, c.issuer, src, c.subject)
 
 // Whether the algorithm inside the tbsCertificate equals the one
 // beside the signature.
@@ -281,7 +456,9 @@ pub fn is_self_issued(src: Bytes, c: X509Cert) -> Bool []
 // what a verifier would pick and the inner one is what was signed, so
 // a mismatch is a substitution nobody would notice.
 pub fn algorithms_agree(c: X509Cert) -> Bool []
-    todo("x509-nv.x509cert.algorithms_agree")
+    let a = c.signature_algorithm
+    let b = c.outer_algorithm
+    asn1oid.equals(a.algorithm, b.algorithm) and same_parameters(a.parameters, b.parameters)
 
 // The OID of the algorithm the subject's public key belongs to.
 //
@@ -290,7 +467,8 @@ pub fn algorithms_agree(c: X509Cert) -> Bool []
 // on this registry can verify a signature with, which
 // `x509verify.algorithm_name` says in words.
 pub fn public_key_algorithm(c: X509Cert) -> AsnOid []
-    todo("x509-nv.x509cert.public_key_algorithm")
+    let k = c.public_key
+    k.algorithm.algorithm
 
 // The subject's public key, algorithm and all.
 //
@@ -298,30 +476,33 @@ pub fn public_key_algorithm(c: X509Cert) -> AsnOid []
 // `asn1pkix.ed25519_public_key` to get the bytes a verification
 // package takes.
 pub fn public_key_of(c: X509Cert) -> AsnSubjectPublicKeyInfo []
-    todo("x509-nv.x509cert.public_key_of")
+    c.public_key
 
 // The issuer's distinguished name.
 pub fn issuer_of(c: X509Cert) -> AsnName []
-    todo("x509-nv.x509cert.issuer_of")
+    c.issuer
 
 // The subject's distinguished name.
 pub fn subject_of(c: X509Cert) -> AsnName []
-    todo("x509-nv.x509cert.subject_of")
+    c.subject
 
 // The extensions, in the order they were written.
 //
 // Empty for a v1 or v2 certificate.  `x509ext` is where each one is
 // read.
 pub fn extensions_of(c: X509Cert) -> [AsnExtension] []
-    todo("x509-nv.x509cert.extensions_of")
+    c.extensions[:]
 
 // Whether the certificate carries the extension with this OID.
 pub fn has_extension(c: X509Cert, o: AsnOid) -> Bool []
-    todo("x509-nv.x509cert.has_extension")
+    for e in c.extensions
+        if asn1oid.equals(e.oid, o)
+            return true
+    false
 
 // The certificate's version: 1, 2 or 3.
 pub fn version_of(c: X509Cert) -> Int []
-    todo("x509-nv.x509cert.version_of")
+    c.version
 
 // Whether the certificate is conforming in the ways a reader can check
 // without a chain, or the first refusal if it is not.
@@ -337,4 +518,28 @@ pub fn version_of(c: X509Cert) -> Int []
 // claims to be and still be a certificate nobody should have issued,
 // and the two answers go to different people.
 pub fn check_conformance(src: Bytes, c: X509Cert, limits: AsnLimits) -> ?X509Error []
-    todo("x509-nv.x509cert.check_conformance")
+    if list.len(c.extensions) > 0 and c.version < X509_VERSION_3
+        return Some(X509ImpossibleField(at: c.tbs.off, field: "extensions",
+                                        why: "extensions require version 3"))
+    if x509name.is_empty(c.issuer)
+        return Some(X509ImpossibleField(at: c.tbs.off, field: "issuer",
+                                        why: "an issuer name is required"))
+    if x509name.is_empty(c.subject) and not subject_alt_is_critical(c)
+        return Some(X509ImpossibleField(at: c.tbs.off, field: "subject",
+                   why: "an empty subject requires a critical subjectAltName"))
+    if bytes.len(c.serial) == 0
+        return Some(X509ImpossibleField(at: c.tbs.off, field: "serialNumber",
+                                        why: "a serial number of zero length"))
+    if (bytes.byte_at(c.serial, 0) ?? 0) >= 128
+        return Some(X509ImpossibleField(at: c.tbs.off, field: "serialNumber",
+                                        why: "a negative serial number"))
+    if civil.compare_datetime(c.not_after, c.not_before) < 0
+        return Some(X509ImpossibleField(at: c.tbs.off, field: "validity",
+                                        why: "notAfter precedes notBefore"))
+    if not algorithms_agree(c)
+        return Some(X509AlgorithmMismatch(index: 0))
+    if c.der.off < 0 or c.der.off + c.der.len > bytes.len(src)
+        return Some(X509MissingField(at: c.der.off, field: "tbsCertificate"))
+    if c.tbs.off < 0 or c.tbs.off + c.tbs.len > bytes.len(src)
+        return Some(X509MissingField(at: c.tbs.off, field: "tbsCertificate"))
+    None

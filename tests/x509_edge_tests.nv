@@ -1,0 +1,733 @@
+// tests/x509_edge_tests.nv — the four rules this package is judged on,
+// at their boundaries.
+//
+// The five suites beside this one are the interface release's own
+// oracle: they were written against the signatures.  This file is the
+// other half a signature cannot state, and it is where the four claims
+// the task names are pinned:
+//
+//   1. **DER is canonical, and a reader that accepts non-canonical
+//      input accepts certificates other implementations reject.**  The
+//      forms this package refuses are exactly asn1-nv's five DER rules
+//      over BER, and the CALLER's `AsnLimits` choose them — the same
+//      document parses under `ber_limits()` and is refused under
+//      `default_limits()`.  The two RFC 5280 states that no rule here
+//      checks are named at the end of this file and NOT enforced.
+//   2. **The validity window is a range check against an instant the
+//      caller supplies, inclusive at BOTH ends.**  The two edges and
+//      one second outside each are all four pinned, and the instant is
+//      an argument: one certificate answers differently at two of them.
+//   3. **A name comparison is not a string comparison.**  A name that
+//      differs only in case, and a name that differs only in its ASN.1
+//      string type, are pinned: both print the same to a person, both
+//      fail `issuer_matches_subject`, and a chain through each one
+//      refuses by name.
+//   4. **A length is an instruction from whoever wrote the file and is
+//      never trusted unchecked.**  Three lies at three nesting depths,
+//      and which reader catches each one: the outer length against the
+//      buffer, a nested length against its parent, and a value inside
+//      an extension against the OCTET STRING that holds it.
+//
+// The documents below are hand-built so that each one differs from the
+// well-formed pair by exactly one thing.  A fixture built by an encoder
+// would have been re-encoded by it, and several of these tests are
+// about the bytes that are there.
+
+use std.test
+use std.bytes
+use civil
+use asn1read
+use asn1err
+use asn1oid
+use x509cert
+use x509ext
+use x509name
+use x509path
+use x509err
+use x509verify
+
+// The bounds every read here is made under: depth 64, a 16 MiB value,
+// DER strictly.
+fn limits() -> AsnLimits
+    asn1read.default_limits()
+
+// The same bounds with the five rules BER allows and DER does not.
+fn loose() -> AsnLimits
+    asn1read.ber_limits()
+
+// ── the documents ───────────────────────────────────────────────────
+
+// The well-formed leaf: `CN=Example Leaf`, issued by `CN=Example CA`,
+// valid 2025-01-01T00:00:00Z to 2026-01-01T00:00:00Z, with a subject
+// alternative name of `example.com` and `*.example.com`.
+fn leaf_der() -> Bytes
+    let hex = "3081b33081a0a00302010202010a300a06082a8648ce3d0403023015311330110603550403130a4578616d706c65204341301e170d3235303130313030303030305a170d3236303130313030303030305a3017311530130603550403130c4578616d706c65204c656166300f300906072a8648ce3d020103020000a329302730250603551d11041e301c820b6578616d706c652e636f6d820d2a2e6578616d706c652e636f6d300a06082a8648ce3d04030203020000"
+    bytes.from_hex(hex) ?? bytes.zeros(0)
+
+// The anchor the leaf was issued by: `CN=Example CA`, self-issued,
+// `basicConstraints` cA TRUE and `keyUsage` keyCertSign, valid
+// 2020-01-01T00:00:00Z to 2030-01-01T00:00:00Z.
+fn anchor_der() -> Bytes
+    let hex = "3081ab308198a003020102020101300a06082a8648ce3d0403023015311330110603550403130a4578616d706c65204341301e170d3230303130313030303030305a170d3330303130313030303030305a3015311330110603550403130a4578616d706c65204341300f300906072a8648ce3d020103020000a3233021300f0603551d130101ff040530030101ff300e0603551d0f0101ff040403020204300a06082a8648ce3d04030203020000"
+    bytes.from_hex(hex) ?? bytes.zeros(0)
+
+// The same anchor, carrying a `nameConstraints` extension that permits
+// the subtree `example.com` and nothing else.
+fn constrained_anchor_der() -> Bytes
+    let hex = "3081ca3081b7a003020102020101300a06082a8648ce3d0403023015311330110603550403130a4578616d706c65204341301e170d3230303130313030303030305a170d3330303130313030303030305a3015311330110603550403130a4578616d706c65204341300f300906072a8648ce3d020103020000a3423040300f0603551d130101ff040530030101ff300e0603551d0f0101ff040403020204301d0603551d1e0101ff04133011a00f300d820b6578616d706c652e636f6d300a06082a8648ce3d04030203020000"
+    bytes.from_hex(hex) ?? bytes.zeros(0)
+
+// A leaf whose issuer name is the anchor's in another CASE:
+// `CN=example ca` against the anchor's `CN=Example CA`.
+fn leaf_lower_der() -> Bytes
+    let hex = "3081a4308191a00302010202010a300a06082a8648ce3d0403023015311330110603550403130a6578616d706c65206361301e170d3235303130313030303030305a170d3236303130313030303030305a3017311530130603550403130c4578616d706c65204c656166300f300906072a8648ce3d020103020000a31a301830160603551d11040f300d820b6578616d706c652e636f6d300a06082a8648ce3d04030203020000"
+    bytes.from_hex(hex) ?? bytes.zeros(0)
+
+// A leaf whose issuer name is the anchor's text in another ASN.1 string
+// TYPE: the same ten characters, written UTF8String rather than
+// PrintableString.
+fn leaf_utf8_der() -> Bytes
+    let hex = "3081a4308191a00302010202010a300a06082a8648ce3d04030230153113301106035504030c0a4578616d706c65204341301e170d3235303130313030303030305a170d3236303130313030303030305a3017311530130603550403130c4578616d706c65204c656166300f300906072a8648ce3d020103020000a31a301830160603551d11040f300d820b6578616d706c652e636f6d300a06082a8648ce3d04030203020000"
+    bytes.from_hex(hex) ?? bytes.zeros(0)
+
+// A leaf whose subject alternative name is `example.org`, which the
+// constrained anchor does not permit.
+fn leaf_org_der() -> Bytes
+    let hex = "3081a8308195a00302010202010b300a06082a8648ce3d0403023015311330110603550403130a4578616d706c65204341301e170d3235303130313030303030305a170d3236303130313030303030305a301b31193017060355040313104578616d706c65204f7267204c656166300f300906072a8648ce3d020103020000a31a301830160603551d11040f300d820b6578616d706c652e6f7267300a06082a8648ce3d04030203020000"
+    bytes.from_hex(hex) ?? bytes.zeros(0)
+
+// A leaf whose serial number is `02 02 00 0a`: the value 10 with a
+// redundant leading zero, which DER forbids and BER allows.
+fn redundant_serial_der() -> Bytes
+    let hex = "3081a5308192a0030201020202000a300a06082a8648ce3d0403023015311330110603550403130a4578616d706c65204341301e170d3235303130313030303030305a170d3236303130313030303030305a3017311530130603550403130c4578616d706c65204c656166300f300906072a8648ce3d020103020000a31a301830160603551d11040f300d820b6578616d706c652e636f6d300a06082a8648ce3d04030203020000"
+    bytes.from_hex(hex) ?? bytes.zeros(0)
+
+// A leaf whose tbsCertificate SEQUENCE is written `30 81 a1` where `30
+// 81 a0` would do: a long-form length for a content that fits the short
+// form, which DER forbids and BER allows.
+fn long_form_length_der() -> Bytes
+    let hex = "3081b4308200a0a00302010202010a300a06082a8648ce3d0403023015311330110603550403130a4578616d706c65204341301e170d3235303130313030303030305a170d3236303130313030303030305a3017311530130603550403130c4578616d706c65204c656166300f300906072a8648ce3d020103020000a329302730250603551d11041e301c820b6578616d706c652e636f6d820d2a2e6578616d706c652e636f6d300a06082a8648ce3d04030203020000"
+    bytes.from_hex(hex) ?? bytes.zeros(0)
+
+// A leaf whose issuer name has one relative name holding TWO
+// attributes, written in the wrong order for DER's SET OF rule.
+fn unsorted_rdn_der() -> Bytes
+    let hex = "3081a6308193a00302010202010a300a06082a8648ce3d04030230173115300906035504061302474230080603550403130158301e170d3235303130313030303030305a170d3236303130313030303030305a3017311530130603550403130c4578616d706c65204c656166300f300906072a8648ce3d020103020000a31a301830160603551d11040f300d820b6578616d706c652e636f6d300a06082a8648ce3d04030203020000"
+    bytes.from_hex(hex) ?? bytes.zeros(0)
+
+// A leaf whose 2025 dates are written GeneralizedTime.  RFC 5280
+// section 4.1.2.5 requires UTCTime below 2050 and this package does not
+// check it; the test below pins the ACCEPTANCE so that the shortfall is
+// visible rather than assumed.
+fn generalized_year_der() -> Bytes
+    let hex = "3081a8308195a00302010202010a300a06082a8648ce3d0403023015311330110603550403130a4578616d706c652043413022180f32303235303130313030303030305a180f32303236303130313030303030305a3017311530130603550403130c4578616d706c65204c656166300f300906072a8648ce3d020103020000a31a301830160603551d11040f300d820b6578616d706c652e636f6d300a06082a8648ce3d04030203020000"
+    bytes.from_hex(hex) ?? bytes.zeros(0)
+
+// A leaf whose critical flag on the subject alternative name is `01 01
+// 01` rather than `01 01 ff`.  BER reads any non-zero as true; DER
+// spells true exactly `ff`.
+fn one_byte_boolean_der() -> Bytes
+    let hex = "3081a7308194a00302010202010a300a06082a8648ce3d0403023015311330110603550403130a4578616d706c65204341301e170d3235303130313030303030305a170d3236303130313030303030305a3017311530130603550403130c4578616d706c65204c656166300f300906072a8648ce3d020103020000a31d301b30190603551d11010101040f300d820b6578616d706c652e636f6d300a06082a8648ce3d04030203020000"
+    bytes.from_hex(hex) ?? bytes.zeros(0)
+
+// A leaf whose outer structure is entirely honest and whose innermost
+// value is not: the extnValue OCTET STRING holds fifteen bytes and the
+// SEQUENCE inside it announces twenty-eight.  Every length that
+// encloses it is correct, so only a reader that USES the value can
+// catch it.
+fn lying_extension_der() -> Bytes
+    let hex = "3081a4308191a00302010202010a300a06082a8648ce3d0403023015311330110603550403130a4578616d706c65204341301e170d3235303130313030303030305a170d3236303130313030303030305a3017311530130603550403130c4578616d706c65204c656166300f300906072a8648ce3d020103020000a31a301830160603551d11040f301c820b6578616d706c652e636f6d300a06082a8648ce3d04030203020000"
+    bytes.from_hex(hex) ?? bytes.zeros(0)
+
+// The well-formed leaf with its outer length left as written and the
+// file cut two bytes short: the document is short of its own first
+// length.
+fn outer_short_der() -> Bytes
+    let hex = "3081b33081a0a00302010202010a300a06082a8648ce3d0403023015311330110603550403130a4578616d706c65204341301e170d3235303130313030303030305a170d3236303130313030303030305a3017311530130603550403130c4578616d706c65204c656166300f300906072a8648ce3d020103020000a329302730250603551d11041e301c820b6578616d706c652e636f6d820d2a2e6578616d706c652e636f6d300a06082a8648ce3d0403020302"
+    bytes.from_hex(hex) ?? bytes.zeros(0)
+
+// The same cut, with the outer SEQUENCE's length made honest — so the
+// document is well formed at every level above the last child, and the
+// signatureValue BIT STRING inside it announces two content bytes with
+// none left.
+fn lying_last_child_der() -> Bytes
+    let hex = "3081b13081a0a00302010202010a300a06082a8648ce3d0403023015311330110603550403130a4578616d706c65204341301e170d3235303130313030303030305a170d3236303130313030303030305a3017311530130603550403130c4578616d706c65204c656166300f300906072a8648ce3d020103020000a329302730250603551d11041e301c820b6578616d706c652e636f6d820d2a2e6578616d706c652e636f6d300a06082a8648ce3d0403020302"
+    bytes.from_hex(hex) ?? bytes.zeros(0)
+
+// A leaf whose subject alternative name value is a well formed
+// GeneralNames SEQUENCE with three bytes after it, inside the OCTET
+// STRING.  Every reader of the STRUCTURE would stop at the SEQUENCE's
+// own length and never see them.
+fn trailing_extension_der() -> Bytes
+    let hex = "3081a7308194a00302010202010a300a06082a8648ce3d0403023015311330110603550403130a4578616d706c65204341301e170d3235303130313030303030305a170d3236303130313030303030305a3017311530130603550403130c4578616d706c65204c656166300f300906072a8648ce3d020103020000a31d301b30190603551d110412300d820b6578616d706c652e636f6d000102300a06082a8648ce3d04030203020000"
+    bytes.from_hex(hex) ?? bytes.zeros(0)
+
+// One whole certificate and one byte after it.
+fn trailing_byte_der() -> Bytes
+    let hex = "3081b33081a0a00302010202010a300a06082a8648ce3d0403023015311330110603550403130a4578616d706c65204341301e170d3235303130313030303030305a170d3236303130313030303030305a3017311530130603550403130c4578616d706c65204c656166300f300906072a8648ce3d020103020000a329302730250603551d11041e301c820b6578616d706c652e636f6d820d2a2e6578616d706c652e636f6d300a06082a8648ce3d0403020302000000"
+    bytes.from_hex(hex) ?? bytes.zeros(0)
+
+// ── reading them ────────────────────────────────────────────────────
+
+// The document, parsed.  Every fixture above is a certificate this
+// package reads, so a refusal means the fixture is wrong rather than
+// the rule, and the panic says so.
+fn parsed_under(der: Bytes, l: AsnLimits) -> X509Cert
+    let Ok(c) = x509cert.parse(der, l) else core.panic.panic("x509_edge_tests: the fixture must parse")
+    c
+
+// The same, under the limits a program reading certificates uses.
+fn parsed(der: Bytes) -> X509Cert
+    parsed_under(der, limits())
+
+// The refusal a document this package must not accept produces.
+// `what` names the document in the panic: a fixture that parses is a
+// fixture that is wrong, and the failure has to say which one.
+fn refusal_under(der: Bytes, l: AsnLimits, what: Str) -> X509Error
+    match x509cert.parse(der, l)
+        Err(e) => e
+        Ok(_)  =>
+            core.panic.panic("x509_edge_tests: ${what} parsed, and it must be refused")
+
+// Whether these limits accept the document.
+fn accepts(der: Bytes, l: AsnLimits) -> Bool
+    match x509cert.parse(der, l)
+        Ok(_)  => true
+        Err(_) => false
+
+// Whether a refusal is one of the five forms DER forbids and BER
+// allows — the question `asn1err.is_der_only` answers about the cause
+// this package carries whole.
+fn der_only(e: X509Error) -> Bool
+    match x509err.decode_cause(e)
+        Some(cause) => asn1err.is_der_only(cause)
+        None        => false
+
+// Every certificate in one buffer, in the order they were written.
+fn parsed_all(der: Bytes) -> [X509Cert]
+    let Ok(cs) = x509cert.parse_all(der, limits()) else core.panic.panic("x509_edge_tests: the bundle must parse")
+    cs
+
+// The trust set holding one anchor.
+fn trust_of(der: Bytes) -> X509TrustSet
+    let Ok(a) = x509path.anchor(der, limits()) else core.panic.panic("x509_edge_tests: the anchor must parse")
+    x509path.trust_set([a])
+
+// ── pathLenConstraint fixtures ──────────────────────────────────────
+
+// A CA named "Example CA" whose basicConstraints carry pathLenConstraint
+// 0, issued by the anchor.
+fn path_len_zero_ca_der() -> Bytes
+    bytes.from_hex("3081ae30819ba003020102020102300a06082a8648ce3d0403023015311330110603550403130a4578616d706c65204341301e170d3230303130313030303030305a170d3330303130313030303030305a3015311330110603550403130a4578616d706c65204341300f300906072a8648ce3d020103020000a326302430120603551d130101ff040830060101ff020100300e0603551d0f0101ff040403020204300a06082a8648ce3d04030203020000") ?? bytes.zeros(0)
+
+// A CA named "Example CA" with no pathLenConstraint, issued by a CA named
+// "Example Root": it is not self-issued.
+fn subordinate_ca_der() -> Bytes
+    bytes.from_hex("3081ad30819aa003020102020101300a06082a8648ce3d0403023017311530130603550403130c4578616d706c6520526f6f74301e170d3230303130313030303030305a170d3330303130313030303030305a3015311330110603550403130a4578616d706c65204341300f300906072a8648ce3d020103020000a3233021300f0603551d130101ff040530030101ff300e0603551d0f0101ff040403020204300a06082a8648ce3d04030203020000") ?? bytes.zeros(0)
+
+// A CA named "Example Root" with pathLenConstraint 0, issued by the
+// anchor.
+fn root_named_zero_ca_der() -> Bytes
+    bytes.from_hex("3081b030819da003020102020102300a06082a8648ce3d0403023015311330110603550403130a4578616d706c65204341301e170d3230303130313030303030305a170d3330303130313030303030305a3017311530130603550403130c4578616d706c6520526f6f74300f300906072a8648ce3d020103020000a326302430120603551d130101ff040830060101ff020100300e0603551d0f0101ff040403020204300a06082a8648ce3d04030203020000") ?? bytes.zeros(0)
+
+fn validates_at_open(chain: Bytes, anchor: Bytes) -> Result<X509Path, X509Error>
+    x509path.validate(chain, parsed_all(chain), trust_of(anchor), x509verify.no_verifier(),
+                      at(window_opens() + 10, 0, 0, 0), policy())
+
+// ── instants ────────────────────────────────────────────────────────
+
+// A civil time.  `civil.time_of` answers a `Result`, every argument
+// below is a legal time, and the fallback keeps this total without an
+// unwrap in a suite.
+fn clock(h: Int, m: Int, s: Int) -> CivilTime
+    var t = civil.midnight()
+    match civil.time_of(h, m, s, 0)
+        Ok(v)  =>
+            t = v
+        Err(_) => ()
+    t
+
+// An instant, from an epoch day (1970-01-01 is 0) and a time of day.
+fn at(day: Int, h: Int, m: Int, s: Int) -> CivilDateTime
+    civil.datetime(civil.date_from_epoch_day(day), clock(h, m, s))
+
+// The day counts this suite uses: the leaf's window opens on the 1st of
+// January 2025 (20089) and closes on the 1st of January 2026 (20454).
+fn window_opens() -> Int
+    20089
+
+fn window_closes() -> Int
+    20454
+
+// The policy every path below is validated under: everything `strict()`
+// checks, with a signature nobody can check admitted — because the
+// fixtures are signed by nobody, and "unchecked" is the answer this
+// package reports rather than a failure it invents.
+fn policy() -> X509PathPolicy
+    x509path.allowing_unchecked_signatures(x509path.strict())
+
+// ── the tests ───────────────────────────────────────────────────────
+
+@test
+fn test_a_length_is_checked_against_the_bytes_that_are_actually_there() [io]
+    // Rule 4.  A length is an instruction from whoever wrote the file,
+    // and the only defence is checking it against what is present.  A
+    // reader that took a length and indexed on it would walk off the
+    // end of the buffer, which is how a certificate parser becomes a
+    // memory-safety bug.
+    let whole = leaf_der()
+    test.assert_eq(bytes.len(whole), 182)
+
+    test.case("a file short of its own outer length is refused, at byte 0")
+    let e0 = refusal_under(outer_short_der(), limits(),
+                    "a file short of its own outer length")
+    test.assert(x509err.is_malformed(e0))
+    test.assert(not x509err.is_rule_failure(e0))
+    test.assert_eq(x509err.error_offset(e0), 0)
+    test.assert_some(x509err.decode_cause(e0))
+
+    test.case("an honest outer hiding a lying last child is refused one level down")
+    let deep = lying_last_child_der()
+    test.assert_eq(bytes.len(deep), 180)
+    let e1 = refusal_under(deep, limits(), "an honest outer over a lying last child")
+    test.assert(x509err.is_malformed(e1))
+    test.case("and the refusal names the CHILD, not the file")
+    test.assert(x509err.error_offset(e1) > x509err.error_offset(e0))
+    test.assert(x509err.error_offset(e1) > 0)
+
+    test.case("a refusal about a document names no certificate index")
+    test.assert_eq(x509err.error_index(e1), -1)
+
+    test.case("and the same certificate cut at all three depths is refused too")
+    for n in [10, 100, 170]
+        let e = refusal_under(bytes.slice(whole, 0, n), limits(), "a certificate cut short")
+        test.assert(x509err.is_malformed(e))
+        test.assert(x509err.error_offset(e) <= n)
+
+    test.case("bytes after a whole certificate are a second document, not part of it")
+    let e2 = refusal_under(trailing_byte_der(), limits(),
+                    "a certificate with a byte after it")
+    test.assert(x509err.is_malformed(e2))
+
+@test
+fn test_a_value_that_lies_below_an_honest_document_is_caught_by_the_reader_that_uses_it() [io]
+    // The third depth, and the one a certificate parser cannot catch:
+    // every length above the value is honest and only the value's own
+    // inner SEQUENCE overruns the OCTET STRING that holds it.  The
+    // certificate PARSES — it is a well formed document — and it is the
+    // extension reader that refuses.
+    let der = lying_extension_der()
+    let c = parsed(der)
+
+    test.case("the certificate parses, extension list and all")
+    test.assert_eq(x509cert.version_of(c), x509cert.X509_VERSION_3)
+    test.assert(x509cert.has_extension(c, asn1oid.oid_subject_alt_name()))
+
+    test.case("the reader that trusts the inner length refuses by name")
+    match x509ext.subject_alt_name(x509cert.extensions_of(c), limits())
+        Err(e) =>
+            test.assert(x509err.is_malformed(e))
+            test.assert_eq(x509err.code(e), "bad-extension-value")
+            test.case("at byte 0, because the value is a detached copy and not a span")
+            test.assert_eq(x509err.error_offset(e), 0)
+        Ok(_)  =>
+            core.panic.panic("x509_edge_tests: a lying extension value was read")
+
+    test.case("a path that reads the names refuses, and one that does not is untroubled")
+    let trust = trust_of(anchor_der())
+    match x509path.validate(der, [c], trust, x509verify.no_verifier(),
+                            at(20240, 12, 0, 0), policy())
+        Ok(_)  => test.fail("a lying extension value was accepted under a policy that reads it")
+        Err(e) => test.assert_eq(x509err.code(e), "bad-extension-value")
+
+    test.case("bytes after the structure inside an extension value are refused too")
+    // The same depth again, and the other lie: the value IS exactly one
+    // GeneralNames, and then there are three more bytes in the OCTET
+    // STRING.  Every reader of the structure stops at the SEQUENCE's
+    // own length, so the refusal has to come from the call that asks
+    // whether the whole value is one DER document — and it is a refusal
+    // under BER too, because this is not a question of canonicity.
+    let trailing = parsed(trailing_extension_der())
+    match x509ext.subject_alt_name(x509cert.extensions_of(trailing), limits())
+        Err(e) => test.assert_eq(x509err.code(e), "bad-extension-value")
+        Ok(_)  => test.fail("bytes after an extension value's structure were ignored")
+    match x509ext.subject_alt_name(x509cert.extensions_of(trailing), loose())
+        Err(e) => test.assert_eq(x509err.code(e), "bad-extension-value")
+        Ok(_)  => test.fail("BER limits do not make trailing bytes a second document")
+
+    test.case("with the name constraints check off, nothing reads it")
+    match x509path.validate(der, [c], trust, x509verify.no_verifier(),
+                            at(20240, 12, 0, 0),
+                            x509path.without_name_constraints(policy()))
+        Ok(p)  =>
+            test.assert_eq(x509path.path_length(p), 1)
+            test.assert(not x509path.is_fully_checked(p))
+            test.assert_eq(list.len(x509path.unchecked_of(p)), 1)
+        Err(e) => test.fail(e.message())
+
+@test
+fn test_the_validity_window_is_inclusive_at_both_ends_and_the_clock_is_an_argument() [io]
+    // Rule 2.  RFC 5280 section 4.1.2.5: the certificate is valid from
+    // notBefore until notAfter, BOTH ends included.  The leaf's window
+    // is 2025-01-01T00:00:00Z .. 2026-01-01T00:00:00Z, and the four
+    // instants below are the two edges and one second outside each.
+    let c = parsed(leaf_der())
+    let before = at(window_opens() - 1, 23, 59, 59)
+    let opens = at(window_opens(), 0, 0, 0)
+    let closes = at(window_closes(), 0, 0, 0)
+    let after = at(window_closes(), 0, 0, 1)
+
+    test.case("the window is the one the document states")
+    test.assert_eq(civil.compare_datetime(c.not_before, opens), 0)
+    test.assert_eq(civil.compare_datetime(c.not_after, closes), 0)
+
+    test.case("one second before it, and the first second of it")
+    test.assert(not x509cert.is_valid_at(c, before))
+    test.assert(x509cert.is_valid_at(c, opens))
+
+    test.case("the last second of it, and one second after")
+    test.assert(x509cert.is_valid_at(c, closes))
+    test.assert(not x509cert.is_valid_at(c, after))
+
+    test.case("and each edge is exactly one second from its refusal")
+    test.assert_eq(civil.compare_datetime(opens, before), 1)
+    test.assert_eq(civil.compare_datetime(after, closes), 1)
+
+    test.case("check_validity_at names the way it failed, and the certificate it was told about")
+    match x509cert.check_validity_at(c, before, 0)
+        None    => test.fail("an instant before notBefore is not a valid one")
+        Some(e) =>
+            test.assert_eq(x509err.code(e), "cert-not-yet-valid")
+            test.assert(x509err.is_validity_failure(e))
+            test.assert_eq(x509err.error_index(e), 0)
+    match x509cert.check_validity_at(c, after, 3)
+        None    => test.fail("an instant after notAfter is not a valid one")
+        Some(e) =>
+            test.assert_eq(x509err.code(e), "cert-expired")
+            test.assert(x509err.is_validity_failure(e))
+            test.case("the index is the caller's and comes back unchanged")
+            test.assert_eq(x509err.error_index(e), 3)
+
+    test.case("the instant is an argument: one certificate, two answers")
+    test.assert_ne(x509cert.is_valid_at(c, opens), x509cert.is_valid_at(c, after))
+
+    test.case("and a whole path is checked at the instant it was handed")
+    let trust = trust_of(anchor_der())
+    match x509path.validate(leaf_der(), [c], trust, x509verify.no_verifier(), before, policy())
+        Ok(_)  => test.fail("a path at an instant before notBefore is not valid")
+        Err(e) =>
+            test.assert_eq(x509err.code(e), "cert-not-yet-valid")
+            test.assert_eq(x509err.error_index(e), 0)
+
+    match x509path.validate(leaf_der(), [c], trust, x509verify.no_verifier(), after, policy())
+        Ok(_)  => test.fail("a path at an instant after notAfter is not valid")
+        Err(e) => test.assert_eq(x509err.code(e), "cert-expired")
+
+    test.case("both edges validate, inclusive of the second each one falls on")
+    match x509path.validate(leaf_der(), [c], trust, x509verify.no_verifier(), opens, policy())
+        Ok(p)  => test.assert_eq(x509path.path_length(p), 1)
+        Err(e) => test.fail(e.message())
+    match x509path.validate(leaf_der(), [c], trust, x509verify.no_verifier(), closes, policy())
+        Ok(p)  => test.assert_eq(x509path.path_length(p), 1)
+        Err(e) => test.fail(e.message())
+
+@test
+fn test_a_name_is_compared_by_its_encoding_and_not_by_its_text() [io]
+    // Rule 3.  RFC 5280 section 7.1 defines a full matching algorithm —
+    // case folding, whitespace collapse, equivalence between
+    // PrintableString and UTF8String — and this package implements the
+    // rule chain building needs instead: the two names' encodings must
+    // be equal.  Two comparisons a string comparison would call equal
+    // are pinned here, with the chain each one breaks.
+    let anchor = parsed(anchor_der())
+    let lower = parsed(leaf_lower_der())
+    let utf8 = parsed(leaf_utf8_der())
+    let subject = x509name.to_rfc4514(x509cert.subject_of(anchor))
+
+    test.case("the same name in another case prints differently")
+    let issuer_lower = x509name.to_rfc4514(x509cert.issuer_of(lower))
+    test.assert_ne(issuer_lower, subject)
+    test.assert_eq_str(str.lower(issuer_lower), str.lower(subject))
+
+    test.case("and is not a match, because the encodings differ")
+    test.assert(not x509name.issuer_matches_subject(leaf_lower_der(),
+                                                    x509cert.issuer_of(lower),
+                                                    anchor_der(),
+                                                    x509cert.subject_of(anchor)))
+
+    test.case("a chain built through it does not link")
+    match x509path.validate(leaf_lower_der(), [lower], trust_of(anchor_der()),
+                            x509verify.no_verifier(), at(20240, 12, 0, 0), policy())
+        Ok(_)  => test.fail("a case-differing issuer name linked a chain")
+        Err(e) =>
+            test.assert_eq(x509err.code(e), "issuer-not-found")
+            test.assert_eq(x509err.error_index(e), 0)
+
+    test.case("the same text in another string TYPE prints the same")
+    test.assert_eq_str(x509name.to_rfc4514(x509cert.issuer_of(utf8)), subject)
+
+    test.case("and is not a match either, which is the whole rule")
+    test.assert(not x509name.issuer_matches_subject(leaf_utf8_der(),
+                                                    x509cert.issuer_of(utf8),
+                                                    anchor_der(),
+                                                    x509cert.subject_of(anchor)))
+
+    test.case("a chain built through THAT one does not link either")
+    match x509path.validate(leaf_utf8_der(), [utf8], trust_of(anchor_der()),
+                            x509verify.no_verifier(), at(20240, 12, 0, 0), policy())
+        Ok(_)  => test.fail("a re-encoded issuer name linked a chain")
+        Err(e) => test.assert_eq(x509err.code(e), "issuer-not-found")
+
+    test.case("and names whose encodings DO agree match")
+    test.assert(x509name.issuer_matches_subject(leaf_der(),
+                                                x509cert.issuer_of(parsed(leaf_der())),
+                                                anchor_der(),
+                                                x509cert.subject_of(anchor)))
+
+    test.case("a hostname is matched against the alternative names and never the common name")
+    match x509ext.subject_alt_name(x509cert.extensions_of(parsed(leaf_der())), limits())
+        Ok(Some(names)) =>
+            test.assert(x509path.matches_hostname(names, "example.com"))
+            test.assert(x509path.matches_hostname(names, "a.example.com"))
+            test.assert(not x509path.matches_hostname(names, "a.b.example.com"))
+            test.assert(not x509path.matches_hostname(names, "example.org"))
+        _               => test.fail("the leaf fixture carries a subject alternative name")
+
+@test
+fn test_the_canonical_forms_are_the_limits_the_caller_reads_under() [io]
+    // Rule 1.  DER is BER plus five rules, and a reader that accepts a
+    // violation of one accepts a document other implementations reject
+    // — which matters most inside a signature, where two encodings of
+    // one value are two different byte strings.  This package enforces
+    // asn1-nv's five under `default_limits()` and none of them under
+    // `ber_limits()`: there is no DER switch inside this package and
+    // the caller chooses by handing in limits.
+
+    test.case("a serial with a redundant leading zero (DER: non-minimal INTEGER)")
+    let n1 = redundant_serial_der()
+    let e1 = refusal_under(n1, limits(), "a serial with a redundant leading zero")
+    test.assert(x509err.is_malformed(e1))
+    test.assert(der_only(e1))
+    test.assert(accepts(n1, loose()))
+    test.case("and under BER the byte it wrote is still there, unwritten")
+    test.assert_eq_str(x509cert.serial_hex(parsed_under(n1, loose())), "000a")
+
+    test.case("a long-form length where the short form would do")
+    let n2 = long_form_length_der()
+    let e2 = refusal_under(n2, limits(), "a long-form length where the short form would do")
+    test.assert(x509err.is_malformed(e2))
+    test.assert(der_only(e2))
+    test.assert(accepts(n2, loose()))
+    test.case("the same document, two limits, two answers")
+    test.assert_ne(accepts(n2, limits()), accepts(n2, loose()))
+
+    test.case("a relative name whose attributes are not in DER's order")
+    let n3 = unsorted_rdn_der()
+    let e3 = refusal_under(n3, limits(), "a relative name out of DER order")
+    test.assert(x509err.is_malformed(e3))
+    test.assert(der_only(e3))
+    test.assert(accepts(n3, loose()))
+    test.case("and under BER the name keeps both attributes, in the order written")
+    let name = x509cert.issuer_of(parsed_under(n3, loose()))
+    test.assert_eq(x509name.rdn_count(name), 1)
+    test.assert_eq(list.len(x509name.attributes(name)), 2)
+
+    test.case("a critical flag of 01 rather than DER's ff (BER: any non-zero is true)")
+    let n4 = one_byte_boolean_der()
+    let e4 = refusal_under(n4, limits(), "a critical flag of 01")
+    test.assert(x509err.is_malformed(e4))
+    test.assert(der_only(e4))
+    test.assert(accepts(n4, loose()))
+    test.case("and under BER the extension is critical")
+    test.assert(x509ext.is_critical(x509cert.extensions_of(parsed_under(n4, loose())),
+                                    asn1oid.oid_subject_alt_name()))
+
+    test.case("the five rules are asn1-nv's, so a refusal says which one")
+    test.assert_eq(x509err.code(e1), "not-der")
+    test.assert_some(x509err.decode_cause(e1))
+    test.assert_some(x509err.decode_cause(e3))
+    test.assert_some(x509err.decode_cause(e4))
+
+    test.case("NOT enforced: the time form RFC 5280 section 4.1.2.5 fixes")
+    // A date before 2050 must be written UTCTime and this reader takes
+    // GeneralizedTime for it.  The document is accepted, and that is
+    // pinned here rather than left to be discovered: it is named in the
+    // CHANGELOG's `### Known`.
+    let late = parsed(generalized_year_der())
+    test.assert_eq(civil.compare_datetime(late.not_before, at(window_opens(), 0, 0, 0)), 0)
+    test.assert(x509cert.is_valid_at(late, at(20240, 12, 0, 0)))
+
+@test
+fn test_a_chain_the_caller_built_is_walked_to_the_anchor_it_names() [io]
+    // x509path turns the four rules above into one answer, and the
+    // oracle's fixtures for it are documents that do not parse — so
+    // this is where a chain that is real end to end is walked.
+    //
+    // One buffer holds both certificates, because `validate` and
+    // `check_chain_order` take the buffer the CHAIN was parsed out of:
+    // every name in a certificate is a span into those bytes, so a
+    // chain assembled from four separate downloads is a chain whose
+    // names are read out of the wrong file.  `parse_all` is the call
+    // for the shape a fullchain file arrives in.
+    let bundle = bytes.concat([leaf_der(), anchor_der()])
+    let both = parsed_all(bundle)
+    let leaf = both[0]
+    let anchor = both[1]
+    let pool = [leaf, anchor]
+
+    test.case("a leaf and its issuer are in the order a chain is written in")
+    match x509path.check_chain_order(bundle, pool)
+        Some(e) => test.fail(e.message())
+        None    => test.assert(true)
+
+    test.case("reversed, the order check names the first certificate that does not fit")
+    match x509path.check_chain_order(bundle, [anchor, leaf])
+        Some(e) =>
+            test.assert_eq(x509err.code(e), "issuer-not-found")
+            test.assert_eq(x509err.error_index(e), 0)
+        None    => test.fail("a reversed chain was accepted in order")
+
+    test.case("a chain is built from a pool and stops at the anchor")
+    match x509path.build_chain(bundle, leaf, pool, trust_of(anchor_der()))
+        Ok(chain) => test.assert_eq(list.len(chain), 2)
+        Err(e)    => test.fail(e.message())
+
+    test.case("with no anchor for the top certificate, it refuses and says which")
+    match x509path.build_chain(bundle, leaf, pool, x509path.empty_trust_set())
+        Ok(_)  => test.fail("a chain was built with nothing to anchor it")
+        Err(e) =>
+            test.assert_eq(x509err.code(e), "issuer-not-found")
+            test.assert_eq(x509err.error_index(e), 1)
+
+    test.case("a validated path reports the anchor, its length and what it could not check")
+    match x509path.validate(bundle, [leaf], trust_of(anchor_der()),
+                            x509verify.no_verifier(), at(20240, 12, 0, 0), policy())
+        Ok(p)  =>
+            let a = x509path.anchor_of(p)
+            test.assert_eq_str(x509name.to_rfc4514(a.cert.subject), "CN=Example CA")
+            test.assert_eq(x509path.path_length(p), 1)
+            test.assert_eq(x509cert.version_of(x509path.leaf_of(p)), x509cert.X509_VERSION_3)
+            test.case("the one signature nobody could check is reported by index")
+            test.assert(not x509path.is_fully_checked(p))
+            test.assert_eq(list.len(x509path.unchecked_of(p)), 1)
+            test.assert_eq(x509path.unchecked_of(p)[0], 0)
+            test.case("and no certificate asserted a policy")
+            test.assert_eq(list.len(x509path.policies_of(p)), 0)
+        Err(e) => test.fail(e.message())
+
+    test.case("the whole chain, in order, validates in one call")
+    match x509path.validate(bundle, pool, trust_of(anchor_der()),
+                            x509verify.no_verifier(), at(20240, 12, 0, 0), policy())
+        Ok(p)  => test.assert_eq(x509path.path_length(p), 2)
+        Err(e) => test.fail(e.message())
+
+    test.case("a chain longer than the policy allows is refused before it is walked")
+    match x509path.validate(bundle, [leaf], trust_of(anchor_der()),
+                            x509verify.no_verifier(), at(20240, 12, 0, 0),
+                            x509path.with_max_chain_length(policy(), 0))
+        Ok(_)  => test.fail("a policy that could never accept anything accepted a chain")
+        Err(e) => test.assert_eq(x509err.code(e), "policy-unusable")
+
+    test.case("an empty chain, and an empty trust set, are each their own refusal")
+    match x509path.validate(bundle, [], trust_of(anchor_der()),
+                            x509verify.no_verifier(), at(20240, 12, 0, 0), policy())
+        Ok(_)  => test.fail("an empty chain validated")
+        Err(e) => test.assert_eq(x509err.code(e), "empty-chain")
+    match x509path.validate(bundle, [leaf], x509path.empty_trust_set(),
+                            x509verify.no_verifier(), at(20240, 12, 0, 0), policy())
+        Ok(_)  => test.fail("a chain with no anchor validated")
+        Err(e) => test.assert_eq(x509err.code(e), "empty-trust-set")
+
+@test
+fn test_a_name_constraint_is_applied_along_the_path_and_names_what_it_refused() [io]
+    // RFC 5280 section 4.2.1.10: a CA may say which names the
+    // certificates BELOW it may carry.  The anchor here permits
+    // `example.com` and nothing else.
+    let trust = trust_of(constrained_anchor_der())
+
+    test.case("a name inside the permitted subtree validates")
+    match x509path.validate(leaf_der(), [parsed(leaf_der())], trust, x509verify.no_verifier(),
+                            at(20240, 12, 0, 0), policy())
+        Ok(p)  => test.assert_eq(x509path.path_length(p), 1)
+        Err(e) => test.fail(e.message())
+
+    test.case("a name outside it is refused, with the certificate that carries it")
+    match x509path.validate(leaf_org_der(), [parsed(leaf_org_der())], trust,
+                            x509verify.no_verifier(), at(20240, 12, 0, 0), policy())
+        Ok(_)  => test.fail("a name outside the permitted subtree validated")
+        Err(e) =>
+            test.assert_eq(x509err.code(e), "name-constraint-violated")
+            test.assert_eq(x509err.error_index(e), 0)
+
+    test.case("turning the check off is one call, and it costs what the name says")
+    let relaxed = x509path.without_name_constraints(policy())
+    test.assert(not relaxed.enforce_name_constraints)
+    test.assert_eq(list.len(relaxed.known_extension_oids), 1)
+    match x509path.validate(leaf_org_der(), [parsed(leaf_org_der())], trust,
+                            x509verify.no_verifier(), at(20240, 12, 0, 0), relaxed)
+        Ok(p)  => test.assert_eq(x509path.path_length(p), 1)
+        Err(e) => test.fail(e.message())
+
+    test.case("no constraint at all permits every name, which is what an empty list means")
+    match x509ext.subject_alt_name(x509cert.extensions_of(parsed(leaf_org_der())), limits())
+        Ok(Some(names)) => test.assert(x509path.names_permitted([], names))
+        Ok(None)        => test.fail("the fixture carries a subject alternative name")
+        Err(e)          => test.fail(e.message())
+
+@test
+fn test_every_refusal_renders_as_one_line_for_a_person() [io]
+    // The refusals are this package's output to whoever reads the log,
+    // and every arm renders through an interpolated string.  The three
+    // below carry a rendered time or an index, which is where a change
+    // would show in the text rather than only in the arm.
+    let c = parsed(leaf_der())
+
+    test.case("an expired certificate names itself and the moment it expired")
+    match x509cert.check_validity_at(c, at(window_closes(), 0, 0, 1), 2)
+        None    => test.fail("the instant is one second past notAfter")
+        Some(e) =>
+            let line = e.message()
+            test.assert(str.contains(line, "certificate 2"))
+            test.assert(str.contains(line, "2026-01-01T00:00:00Z"))
+
+    test.case("a certificate not yet valid says so in the same shape")
+    match x509cert.check_validity_at(c, at(window_opens() - 1, 23, 59, 59), 0)
+        None    => test.fail("the instant is one second before notBefore")
+        Some(e) =>
+            let line = e.message()
+            test.assert(str.contains(line, "certificate 0"))
+            test.assert(str.contains(line, "2025-01-01T00:00:00Z"))
+
+    test.case("a malformed document renders the decode cause underneath it")
+    let line = refusal_under(outer_short_der(), limits(),
+                    "a file short of its own outer length").message()
+    test.assert(str.contains(line, "x509:"))
+
+// ── pathLenConstraint (RFC 5280 section 4.2.1.9) ───────────────────
+
+@test
+fn test_a_ca_with_path_length_zero_may_issue_the_end_entity_certificate() [io]
+    // leaf, then a CA with pathLenConstraint 0, then the anchor.  No
+    // intermediate follows the CA, so the constraint is met.
+    let chain = bytes.concat([leaf_der(), path_len_zero_ca_der()])
+    match validates_at_open(chain, anchor_der())
+        Ok(p)  => test.assert_eq(x509path.path_length(p), 2)
+        Err(e) => test.fail(e.message())
+
+@test
+fn test_a_self_issued_intermediate_does_not_count_against_the_path_length() [io]
+    // leaf, then a CA named like the anchor that the anchor's own name
+    // issued (self-issued), then the zero-length CA.
+    let chain = bytes.concat([leaf_der(), anchor_der(), path_len_zero_ca_der()])
+    match validates_at_open(chain, anchor_der())
+        Ok(p)  => test.assert_eq(x509path.path_length(p), 3)
+        Err(e) => test.fail(e.message())
+
+@test
+fn test_one_intermediate_below_a_path_length_zero_ca_is_refused_at_that_ca() [io]
+    let chain = bytes.concat([leaf_der(), subordinate_ca_der(), root_named_zero_ca_der()])
+    match validates_at_open(chain, anchor_der())
+        Ok(_)  => test.fail("a chain with an intermediate below pathLenConstraint 0 validated")
+        Err(e) =>
+            test.assert_eq(x509err.code(e), "path-len-exceeded")
+            test.assert_eq(x509err.error_index(e), 2)

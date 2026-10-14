@@ -1,8 +1,5 @@
 // x509path — path validation as a pure function.
 //
-// Every body is a `todo()`.  The signatures are the design, and the
-// compiler checks them as claims; see the README for the stamp.
-//
 // WHAT PATH VALIDATION IS.  A certificate on its own says nothing.  It
 // becomes meaningful when there is a chain from it to something the
 // reader already trusts: certificate 0 was issued by certificate 1,
@@ -55,6 +52,12 @@
 // own, from a trust store, so `X509Anchor` carries its own bytes.
 
 use std.bytes
+use asn1oid
+use asn1read
+use x509cert
+use x509ext
+use x509name
+use x509verify
 
 // The chain length `strict()` bounds a path at.
 //
@@ -194,11 +197,12 @@ pub struct X509Path
 //         Err(e) => println(e.message())
 // ```
 pub fn anchor(der: Bytes, limits: AsnLimits) -> Result<X509Anchor, X509Error> []
-    todo("x509-nv.x509path.anchor")
+    let cert = x509cert.parse(der, limits)!
+    Ok(X509Anchor { der: bytes.clone(der), cert: cert })
 
 // A trust set from anchors the caller built.
 pub fn trust_set(anchors: [X509Anchor]) -> X509TrustSet []
-    todo("x509-nv.x509path.trust_set")
+    X509TrustSet { anchors: list.clone(anchors) }
 
 // A trust set with no anchors in it.
 //
@@ -206,15 +210,15 @@ pub fn trust_set(anchors: [X509Anchor]) -> X509TrustSet []
 // a configuration mistake with its own name rather than a chain that
 // mysteriously would not terminate.
 pub fn empty_trust_set() -> X509TrustSet []
-    todo("x509-nv.x509path.empty_trust_set")
+    X509TrustSet { anchors: [] }
 
 // The anchors, in the order they were given.
 pub fn anchors_of(t: X509TrustSet) -> [X509Anchor] []
-    todo("x509-nv.x509path.anchors_of")
+    t.anchors[:]
 
 // How many anchors the set holds.
 pub fn anchor_count(t: X509TrustSet) -> Int []
-    todo("x509-nv.x509path.anchor_count")
+    list.len(t.anchors)
 
 // A trust set with one more anchor.
 //
@@ -222,7 +226,9 @@ pub fn anchor_count(t: X509TrustSet) -> Int []
 // builds a base set and two variants of it holds three independent
 // values.
 pub fn with_anchor(t: X509TrustSet, a: X509Anchor) -> X509TrustSet []
-    todo("x509-nv.x509path.with_anchor")
+    var out = t.anchors[:]
+    list.push(out, a)
+    X509TrustSet { anchors: out }
 
 // The first anchor whose subject name encoding equals this issuer
 // name, or `None`.
@@ -230,7 +236,11 @@ pub fn with_anchor(t: X509TrustSet, a: X509Anchor) -> X509TrustSet []
 // The comparison is over the DER, which is why the issuer arrives with
 // the bytes it was read from.
 pub fn find_anchor(t: X509TrustSet, src: Bytes, issuer: AsnName) -> ?X509Anchor []
-    todo("x509-nv.x509path.find_anchor")
+    for a in t.anchors
+        if x509name.issuer_matches_subject(src, issuer, a.der,
+                                           x509cert.subject_of(a.cert))
+            return Some(a)
+    None
 
 // ── the policy ──────────────────────────────────────────────────────
 
@@ -253,7 +263,11 @@ pub fn find_anchor(t: X509TrustSet, src: Bytes, issuer: AsnName) -> ?X509Anchor 
 //     println("${x509path.strict().require_ca_flag}")   // true
 // ```
 pub fn strict() -> X509PathPolicy []
-    todo("x509-nv.x509path.strict")
+    X509PathPolicy { max_chain_length: X509_MAX_CHAIN_DEFAULT, require_ca_flag: true,
+                     require_key_cert_sign: true, enforce_path_len: true,
+                     enforce_name_constraints: true, check_validity: true,
+                     require_all_signatures_checked: true, known_extension_oids: [],
+                     required_key_purpose: None }
 
 // **A policy that checks the shape of a chain and almost nothing
 // else.**
@@ -268,7 +282,17 @@ pub fn strict() -> X509PathPolicy []
 // decides whether to trust a peer, and the name is what it is so that
 // a reviewer meeting it in a request path asks why.
 pub fn permissive() -> X509PathPolicy []
-    todo("x509-nv.x509path.permissive")
+    // It does not enforce name constraints and it therefore also
+    // declares the OID known: leaving a nameConstraints extension
+    // unknown would refuse every constrained chain, which is the one
+    // thing a policy that "checks the shape and almost nothing else"
+    // must not do.
+    X509PathPolicy { max_chain_length: X509_MAX_CHAIN_DEFAULT, require_ca_flag: false,
+                     require_key_cert_sign: false, enforce_path_len: false,
+                     enforce_name_constraints: false, check_validity: false,
+                     require_all_signatures_checked: false,
+                     known_extension_oids: [x509ext.oid_name_constraints()],
+                     required_key_purpose: None }
 
 // The same policy with a different bound on the chain length.
 //
@@ -282,7 +306,14 @@ pub fn permissive() -> X509PathPolicy []
 //     println("${p.max_chain_length}")   // 3
 // ```
 pub fn with_max_chain_length(p: X509PathPolicy, n: Int) -> X509PathPolicy []
-    todo("x509-nv.x509path.with_max_chain_length")
+    X509PathPolicy { max_chain_length: n, require_ca_flag: p.require_ca_flag,
+                     require_key_cert_sign: p.require_key_cert_sign,
+                     enforce_path_len: p.enforce_path_len,
+                     enforce_name_constraints: p.enforce_name_constraints,
+                     check_validity: p.check_validity,
+                     require_all_signatures_checked: p.require_all_signatures_checked,
+                     known_extension_oids: p.known_extension_oids[:],
+                     required_key_purpose: p.required_key_purpose }
 
 // The same policy, admitting signatures no verifier could check.
 //
@@ -290,7 +321,14 @@ pub fn with_max_chain_length(p: X509PathPolicy, n: Int) -> X509PathPolicy []
 // indices land in `X509Path.unchecked`, and a caller that does not
 // read them is claiming more than it was told.
 pub fn allowing_unchecked_signatures(p: X509PathPolicy) -> X509PathPolicy []
-    todo("x509-nv.x509path.allowing_unchecked_signatures")
+    X509PathPolicy { max_chain_length: p.max_chain_length,
+                     require_ca_flag: p.require_ca_flag,
+                     require_key_cert_sign: p.require_key_cert_sign,
+                     enforce_path_len: p.enforce_path_len,
+                     enforce_name_constraints: p.enforce_name_constraints,
+                     check_validity: p.check_validity, require_all_signatures_checked: false,
+                     known_extension_oids: p.known_extension_oids[:],
+                     required_key_purpose: p.required_key_purpose }
 
 // The same policy, with these extension OIDs counted as known.
 //
@@ -299,7 +337,17 @@ pub fn allowing_unchecked_signatures(p: X509PathPolicy) -> X509PathPolicy []
 // to widen what "recognized" means in RFC 5280 section 4.2, and it is
 // a per-program decision rather than a per-package one.
 pub fn knowing_extensions(p: X509PathPolicy, oids: [AsnOid]) -> X509PathPolicy []
-    todo("x509-nv.x509path.knowing_extensions")
+    var known = p.known_extension_oids[:]
+    for o in oids
+        list.push(known, o)
+    X509PathPolicy { max_chain_length: p.max_chain_length,
+                     require_ca_flag: p.require_ca_flag,
+                     require_key_cert_sign: p.require_key_cert_sign,
+                     enforce_path_len: p.enforce_path_len,
+                     enforce_name_constraints: p.enforce_name_constraints,
+                     check_validity: p.check_validity,
+                     require_all_signatures_checked: p.require_all_signatures_checked,
+                     known_extension_oids: known, required_key_purpose: p.required_key_purpose }
 
 // The same policy, requiring the end-entity certificate to carry this
 // extended key usage.
@@ -309,14 +357,30 @@ pub fn knowing_extensions(p: X509PathPolicy, oids: [AsnOid]) -> X509PathPolicy [
 // restriction and passes; one that names purposes and not this one is
 // refused with `X509KeyPurposeNotPermitted`.
 pub fn requiring_key_purpose(p: X509PathPolicy, purpose: AsnOid) -> X509PathPolicy []
-    todo("x509-nv.x509path.requiring_key_purpose")
+    X509PathPolicy { max_chain_length: p.max_chain_length,
+                     require_ca_flag: p.require_ca_flag,
+                     require_key_cert_sign: p.require_key_cert_sign,
+                     enforce_path_len: p.enforce_path_len,
+                     enforce_name_constraints: p.enforce_name_constraints,
+                     check_validity: p.check_validity,
+                     require_all_signatures_checked: p.require_all_signatures_checked,
+                     known_extension_oids: p.known_extension_oids[:],
+                     required_key_purpose: Some(purpose) }
 
 // The same policy, not checking validity periods.
 //
 // For a tool inspecting an expired chain on purpose.  It does not make
 // an expired certificate valid; it makes the validation stop asking.
 pub fn without_validity_check(p: X509PathPolicy) -> X509PathPolicy []
-    todo("x509-nv.x509path.without_validity_check")
+    X509PathPolicy { max_chain_length: p.max_chain_length,
+                     require_ca_flag: p.require_ca_flag,
+                     require_key_cert_sign: p.require_key_cert_sign,
+                     enforce_path_len: p.enforce_path_len,
+                     enforce_name_constraints: p.enforce_name_constraints,
+                     check_validity: false,
+                     require_all_signatures_checked: p.require_all_signatures_checked,
+                     known_extension_oids: p.known_extension_oids[:],
+                     required_key_purpose: p.required_key_purpose }
 
 // The same policy, not enforcing name constraints — and counting the
 // `nameConstraints` OID as known so the chain is not then refused for
@@ -329,7 +393,16 @@ pub fn without_validity_check(p: X509PathPolicy) -> X509PathPolicy []
 // extension would accept a certificate restricted in a way it never
 // read.  The name says what it costs.
 pub fn without_name_constraints(p: X509PathPolicy) -> X509PathPolicy []
-    todo("x509-nv.x509path.without_name_constraints")
+    var known = p.known_extension_oids[:]
+    list.push(known, x509ext.oid_name_constraints())
+    X509PathPolicy { max_chain_length: p.max_chain_length,
+                     require_ca_flag: p.require_ca_flag,
+                     require_key_cert_sign: p.require_key_cert_sign,
+                     enforce_path_len: p.enforce_path_len,
+                     enforce_name_constraints: false,
+                     check_validity: p.check_validity,
+                     require_all_signatures_checked: p.require_all_signatures_checked,
+                     known_extension_oids: known, required_key_purpose: p.required_key_purpose }
 
 // Whether the policy could ever accept anything, and why not.
 //
@@ -341,7 +414,167 @@ pub fn without_name_constraints(p: X509PathPolicy) -> X509PathPolicy []
 // can name the field — is worth much more than finding it per request
 // as a stream of rejections that all look like somebody else's fault.
 pub fn check_policy(p: X509PathPolicy) -> ?X509Error []
-    todo("x509-nv.x509path.check_policy")
+    if p.max_chain_length < 1
+        return Some(X509PolicyUnusable(why: "a maximum chain length below one can never reach an anchor"))
+    None
+
+// ── the parts the walk below shares ────────────────────────────────
+
+// The outcome of one link of a chain: nothing wrong, a refusal, or a
+// signature nobody could check.
+//
+// Three answers rather than a `Result`, because "unchecked" is a
+// SUCCESS under a policy that admits it and the index still has to
+// reach the caller.  A `Result` would have to spell it as an `Ok` with
+// a flag anyway, and the flag is the whole point.
+struct PathLink
+    // The refusal, when the link failed.
+    fault: ?X509Error
+    // True when the verifier had no implementation of the algorithm
+    // and the policy admitted that.
+    unchecked: Bool
+
+// Whether the pool already holds this certificate.
+//
+// By the span it occupies rather than by value: every certificate in
+// one pool was parsed out of one buffer, so two that point at the same
+// bytes are the same certificate and two that do not are not.
+fn holds_cert(pool: [X509Cert], c: X509Cert) -> Bool []
+    for other in pool
+        if other.der.off == c.der.off and other.der.len == c.der.len
+            return true
+    false
+
+// Every nameConstraints extension on the certificates above `index`,
+// the anchor's included.
+fn constraints_above(src: Bytes, chain: [X509Cert], index: Int, anchor: X509Anchor,
+                     limits: AsnLimits) -> Result<[X509NameConstraints], X509Error> []
+    var out: [X509NameConstraints] = []
+    for i in index + 1..list.len(chain)
+        let here = x509ext.name_constraints(chain[i].extensions, limits)!
+        if let Some(c) = here
+            list.push(out, c)
+    let at_anchor = x509ext.name_constraints(anchor.cert.extensions, limits)!
+    if let Some(c) = at_anchor
+        list.push(out, c)
+    Ok(out)
+
+// Every name a certificate asserts: its subject, written as a
+// directory name, and everything in its subjectAltName.
+fn asserted_names(c: X509Cert, limits: AsnLimits) -> Result<[X509GeneralName], X509Error> []
+    var out: [X509GeneralName] = [X509DirectoryName(name: c.subject)]
+    let alt = x509ext.subject_alt_name(c.extensions, limits)!
+    if let Some(names) = alt
+        for n in names
+            list.push(out, n)
+    Ok(out)
+
+// The first name of `names` that some constraint refuses, or `None`
+// when every one of them is permitted.
+//
+// `names_permitted` is this answering `None`, and `validate` wants the
+// name itself so that the refusal can print it — "a name constraint
+// was violated" without saying which name is not an answer anybody can
+// act on.
+fn first_refused(constraints: [X509NameConstraints],
+                 names: [X509GeneralName]) -> ?X509GeneralName []
+    for n in names
+        for c in constraints
+            if not x509ext.constraints_permit(c, n)
+                return Some(n)
+    None
+
+// One link of the chain: the names must match, the issuer's own rules
+// must permit it to have signed something, and the signature must
+// check — or be one no verifier could check.
+//
+// `anchored` is true when the issuer is the TRUST ANCHOR.  An anchor is
+// believed rather than checked, so its basic constraints, its key usage
+// and its own path length are not asked: an anchor is where the walk
+// stops, and a reader that demanded a CA flag of it would refuse every
+// trust store that holds a bare name-and-key.
+//
+// `below` is the number of non-self-issued intermediate certificates
+// between the end-entity certificate and the issuer, which is what a
+// pathLenConstraint bounds (RFC 5280 section 4.2.1.9 and 6.1.4 (l) and
+// (m)).  The end-entity certificate is not an intermediate and a
+// self-issued one is not counted, so a CA with pathLenConstraint 0 may
+// issue the end-entity certificate itself.
+fn link(src: Bytes, c: X509Cert, issuer_src: Bytes, issuer: X509Cert, index: Int, below: Int,
+        verifier: X509Verifier, policy: X509PathPolicy, limits: AsnLimits,
+        anchored: Bool) -> PathLink []
+    let here = x509cert.issuer_of(c)
+    if not x509name.issuer_matches_subject(src, here, issuer_src,
+                                           x509cert.subject_of(issuer))
+        return PathLink { fault: Some(X509IssuerNotFound(index: index,
+                          issuer: x509name.to_rfc4514(here))),
+                          unchecked: false }
+    let exts = x509cert.extensions_of(issuer)
+    if not anchored
+        if policy.require_ca_flag
+            match x509ext.is_ca(exts, limits)
+                Err(e) =>
+                    return PathLink { fault: Some(e), unchecked: false }
+                Ok(ca) =>
+                    if not ca
+                        return PathLink {
+                            fault: Some(X509NotACertificateAuthority(index: index + 1)),
+                            unchecked: false }
+        if policy.require_key_cert_sign
+            match x509ext.key_usage(exts, limits)
+                Err(e)    =>
+                    return PathLink { fault: Some(e), unchecked: false }
+                Ok(usage) =>
+                    if let Some(k) = usage
+                        if not k.key_cert_sign
+                            return PathLink {
+                                fault: Some(X509KeyCertSignNotPermitted(index: index + 1)),
+                                unchecked: false }
+        if policy.enforce_path_len
+            match x509ext.basic_constraints(exts, limits)
+                Err(e)          =>
+                    return PathLink { fault: Some(e), unchecked: false }
+                Ok(constraints) =>
+                    if let Some(b) = constraints
+                        if b.path_len >= 0 and below > b.path_len
+                            return PathLink {
+                                fault: Some(X509PathLenExceeded(index: index + 1,
+                                                                limit: b.path_len)),
+                                unchecked: false }
+    match x509verify.verify_certificate(verifier, x509cert.public_key_of(issuer), src, c)
+        Err(e)      =>
+            return PathLink { fault: Some(e), unchecked: false }
+        Ok(outcome) =>
+            if x509verify.outcome_is_good(outcome)
+                return PathLink { fault: None, unchecked: false }
+            if x509verify.outcome_is_uncheckable(outcome)
+                if policy.require_all_signatures_checked
+                    return PathLink {
+                        fault: Some(X509NoVerifierForAlgorithm(index: index,
+                            algorithm: x509verify.algorithm_name(c.outer_algorithm))),
+                        unchecked: false }
+                return PathLink { fault: None, unchecked: true }
+            PathLink { fault: Some(X509SignatureInvalid(index: index)), unchecked: false }
+
+// Whether a DNS name matches a certificate's pattern.
+//
+// The wildcard rule of RFC 6125 section 6.4.3: `*` matches exactly one
+// label and only in the leftmost position, so `*.example.com` matches
+// `a.example.com` and neither `example.com` nor `a.b.example.com`.
+//
+// Both sides arrive lower-cased, because DNS is case-insensitive and a
+// certificate written `*.EXAMPLE.COM` is the same certificate.
+fn dns_matches(pattern: Str, host: Str) -> Bool []
+    if str.len(pattern) > 2 and str.starts_with(pattern, "*.")
+        let rest = str.slice(pattern, 2, str.len(pattern))
+        let suffix = "." + rest
+        if str.len(host) <= str.len(suffix)
+            return false
+        if not str.ends_with(host, suffix)
+            return false
+        let label = str.slice(host, 0, str.len(host) - str.len(suffix))
+        return not str.contains(label, ".")
+    pattern == host
 
 // ── validation ──────────────────────────────────────────────────────
 
@@ -385,7 +618,64 @@ pub fn check_policy(p: X509PathPolicy) -> ?X509Error []
 // ```
 pub fn validate(src: Bytes, chain: [X509Cert], trust: X509TrustSet, verifier: X509Verifier,
                 at: CivilDateTime, policy: X509PathPolicy) -> Result<X509Path, X509Error> []
-    todo("x509-nv.x509path.validate")
+    let unusable = check_policy(policy)
+    if let Some(e) = unusable
+        return Err(e)
+    if list.len(chain) == 0
+        return Err(X509EmptyChain)
+    if anchor_count(trust) == 0
+        return Err(X509EmptyTrustSet)
+    if list.len(chain) > policy.max_chain_length
+        return Err(X509ChainTooLong(length: list.len(chain),
+                                    limit: policy.max_chain_length))
+    let top_index = list.len(chain) - 1
+    let top_issuer = x509cert.issuer_of(chain[top_index])
+    let Some(anchor) = find_anchor(trust, src, top_issuer) else
+        return Err(X509IssuerNotFound(index: top_index,
+                                      issuer: x509name.to_rfc4514(top_issuer)))
+    // No limits argument on this call: a caller validating certificates
+    // it already holds passes the bytes, not the budget they were read
+    // under, and the default is the budget this package parses with.
+    let limits = asn1read.default_limits()
+    var unchecked: [Int] = []
+    var policies: [AsnOid] = []
+    var intermediates = 0
+    for i in 0..list.len(chain)
+        let c = chain[i]
+        if i > 0 and not x509cert.is_self_issued(src, c)
+            intermediates = intermediates + 1
+        // `is_issuer` is about THIS certificate, and in a chain written
+        // end-entity first certificate `i` is the issuer of certificate
+        // `i - 1`: everything above the end-entity certificate signed
+        // something, and the end-entity certificate signed nothing.  It
+        // is `i > 0` and not "not the last", because demanding the CA
+        // flag of the leaf refuses every ordinary chain of two
+        // certificates — the leaf is where a chain starts and never an
+        // issuer.
+        let own = check_certificate(src, c, i, i > 0, at, policy, limits)
+        if let Some(e) = own
+            return Err(e)
+        let asserted = x509ext.certificate_policies(c.extensions, limits)!
+        if let Some(asserting) = asserted
+            for p in asserting
+                list.push(policies, asn1oid.oid(asn1oid.arcs_of(p.oid)))
+        let step = if i < top_index
+            link(src, c, src, chain[i + 1], i, intermediates, verifier, policy, limits, false)
+        else
+            link(src, c, anchor.der, anchor.cert, i, intermediates, verifier, policy, limits, true)
+        if let Some(e) = step.fault
+            return Err(e)
+        if step.unchecked
+            list.push(unchecked, i)
+        if policy.enforce_name_constraints
+            let above = constraints_above(src, chain, i, anchor, limits)!
+            let names = asserted_names(c, limits)!
+            let refused = first_refused(above, names)
+            if let Some(n) = refused
+                return Err(X509NameConstraintViolated(index: i,
+                                                      name: x509ext.general_name_text(n)))
+    Ok(X509Path { certificates: list.clone(chain), anchor: anchor, unchecked: unchecked,
+                  policies: policies, length: list.len(chain) })
 
 // Parse a chain out of one buffer and validate it, in one call.
 //
@@ -395,7 +685,8 @@ pub fn validate(src: Bytes, chain: [X509Cert], trust: X509TrustSet, verifier: X5
 // above.
 pub fn validate_der(src: Bytes, trust: X509TrustSet, verifier: X509Verifier, at: CivilDateTime,
                     policy: X509PathPolicy, limits: AsnLimits) -> Result<X509Path, X509Error> []
-    todo("x509-nv.x509path.validate_der")
+    let chain = x509cert.parse_all(src, limits)!
+    validate(src, chain, trust, verifier, at, policy)
 
 // Put a chain in order: the leaf first, then whichever certificate
 // issued it, up to one an anchor issued.
@@ -412,7 +703,24 @@ pub fn validate_der(src: Bytes, trust: X509TrustSet, verifier: X509Verifier, at:
 // backtracks in ways nobody can predict from a log line.
 pub fn build_chain(src: Bytes, leaf: X509Cert, pool: [X509Cert],
                    trust: X509TrustSet) -> Result<[X509Cert], X509Error> []
-    todo("x509-nv.x509path.build_chain")
+    var out: [X509Cert] = [leaf]
+    loop
+        let top = out[list.len(out) - 1]
+        let issuer = x509cert.issuer_of(top)
+        var next: ?X509Cert = None
+        for c in pool
+            if x509name.issuer_matches_subject(src, issuer, src, x509cert.subject_of(c))
+                if not holds_cert(out, c)
+                    if next == None
+                        next = Some(c)
+        if let Some(c) = next
+            list.push(out, c)
+        else
+            let Some(_) = find_anchor(trust, src, issuer) else
+                return Err(X509IssuerNotFound(index: list.len(out) - 1,
+                                              issuer: x509name.to_rfc4514(issuer)))
+            break
+    Ok(out)
 
 // Whether each certificate in the chain was issued by the next, by
 // name — or the first refusal if one was not.
@@ -422,7 +730,14 @@ pub fn build_chain(src: Bytes, leaf: X509Cert, pool: [X509Cert],
 // order, and what a server checks about the bundle it is configured
 // with.
 pub fn check_chain_order(src: Bytes, chain: [X509Cert]) -> ?X509Error []
-    todo("x509-nv.x509path.check_chain_order")
+    for i in 0..list.len(chain)
+        if i + 1 < list.len(chain)
+            let here = x509cert.issuer_of(chain[i])
+            if not x509name.issuer_matches_subject(src, here, src,
+                                                   x509cert.subject_of(chain[i + 1]))
+                return Some(X509IssuerNotFound(index: i,
+                                               issuer: x509name.to_rfc4514(here)))
+    None
 
 // The refusal a certificate's own rules produce at this instant under
 // this policy, or `None`.
@@ -433,27 +748,59 @@ pub fn check_chain_order(src: Bytes, chain: [X509Cert]) -> ?X509Error []
 // a question about it, and because `validate` is built out of it.
 pub fn check_certificate(src: Bytes, c: X509Cert, index: Int, is_issuer: Bool, at: CivilDateTime,
                          policy: X509PathPolicy, limits: AsnLimits) -> ?X509Error []
-    todo("x509-nv.x509path.check_certificate")
+    if policy.check_validity
+        let stale = x509cert.check_validity_at(c, at, index)
+        if let Some(e) = stale
+            return Some(e)
+    let unknown = x509ext.check_unknown_critical(x509cert.extensions_of(c), index,
+                                                 policy.known_extension_oids)
+    if let Some(e) = unknown
+        return Some(e)
+    if let Some(purpose) = policy.required_key_purpose
+        match x509ext.extended_key_usage(x509cert.extensions_of(c), limits)
+            Err(e)       =>
+                return Some(e)
+            Ok(purposes) =>
+                if let Some(ps) = purposes
+                    if not x509ext.has_key_purpose(ps, purpose)
+                        return Some(X509KeyPurposeNotPermitted(index: index,
+                                        purpose: asn1oid.oid_text(purpose)))
+    if is_issuer and policy.require_ca_flag
+        match x509ext.is_ca(x509cert.extensions_of(c), limits)
+            Err(e) =>
+                return Some(e)
+            Ok(ca) =>
+                if not ca
+                    return Some(X509NotACertificateAuthority(index: index))
+    if is_issuer and policy.require_key_cert_sign
+        match x509ext.key_usage(x509cert.extensions_of(c), limits)
+            Err(e)    =>
+                return Some(e)
+            Ok(usage) =>
+                if let Some(k) = usage
+                    if not k.key_cert_sign
+                        return Some(X509KeyCertSignNotPermitted(index: index))
+    None
 
 // ── reading the answer ──────────────────────────────────────────────
 
 // The end-entity certificate the path was built for.
 pub fn leaf_of(p: X509Path) -> X509Cert []
-    todo("x509-nv.x509path.leaf_of")
+    p.certificates[0]
 
 // The anchor the path terminated at.
 pub fn anchor_of(p: X509Path) -> X509Anchor []
-    todo("x509-nv.x509path.anchor_of")
+    p.anchor
 
 // How many certificates sit below the anchor.
 pub fn path_length(p: X509Path) -> Int []
-    todo("x509-nv.x509path.path_length")
+    p.length
 
 // The index of every certificate whose signature went unchecked.
 //
 // Empty when every one was checked.
 pub fn unchecked_of(p: X509Path) -> [Int] []
-    todo("x509-nv.x509path.unchecked_of")
+    p.unchecked[:]
 
 // Whether every signature on the path was actually checked.
 //
@@ -466,11 +813,11 @@ pub fn unchecked_of(p: X509Path) -> [Int] []
 //     println("${x509path.strict().require_all_signatures_checked}")   // true
 // ```
 pub fn is_fully_checked(p: X509Path) -> Bool []
-    todo("x509-nv.x509path.is_fully_checked")
+    list.len(p.unchecked) == 0
 
 // Every policy OID asserted anywhere on the path.
 pub fn policies_of(p: X509Path) -> [AsnOid] []
-    todo("x509-nv.x509path.policies_of")
+    p.policies[:]
 
 // ── names ───────────────────────────────────────────────────────────
 
@@ -488,7 +835,12 @@ pub fn policies_of(p: X509Path) -> [AsnOid] []
 // and then forgetting to check the name has done the expensive half
 // and skipped the one that matters.
 pub fn matches_hostname(names: [X509GeneralName], host: Str) -> Bool []
-    todo("x509-nv.x509path.matches_hostname")
+    let wanted = str.lower(host)
+    for n in names
+        if let X509DnsName(name) = n
+            if dns_matches(str.lower(name), wanted)
+                return true
+    false
 
 // Whether a certificate's names fall inside every name constraint on
 // the path above it.
@@ -497,4 +849,6 @@ pub fn matches_hostname(names: [X509GeneralName], host: Str) -> Bool []
 // so a caller can ask it about a certificate it is considering issuing
 // under a constrained CA.
 pub fn names_permitted(constraints: [X509NameConstraints], names: [X509GeneralName]) -> Bool []
-    todo("x509-nv.x509path.names_permitted")
+    match first_refused(constraints, names)
+        Some(_) => false
+        None    => true
